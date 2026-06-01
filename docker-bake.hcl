@@ -10,6 +10,7 @@ group "default" {
   targets = [
     "pg15", "pg16", "pg17", "pg18",
     "pg15-network", "pg16-network", "pg17-network", "pg18-network",
+    "pg15-anonymize", "pg16-anonymize", "pg17-anonymize", "pg18-anonymize",
   ]
 }
 
@@ -70,4 +71,28 @@ target "pg18-network" {
   inherits = ["_common"]
   args     = { PG_VERSION = "18", UV_PARAMS = "--group network" }
   tags     = ["${REGISTRY}/padmy:${VERSION}-network-18", "${REGISTRY}/padmy:latest-network-18"]
+}
+
+target "pg15-anonymize" {
+  inherits = ["_common"]
+  args     = { PG_VERSION = "15", UV_PARAMS = "--extra anonymize" }
+  tags     = ["${REGISTRY}/padmy:${VERSION}-anonymize-15", "${REGISTRY}/padmy:latest-anonymize-15"]
+}
+
+target "pg16-anonymize" {
+  inherits = ["_common"]
+  args     = { PG_VERSION = "16", UV_PARAMS = "--extra anonymize" }
+  tags     = ["${REGISTRY}/padmy:${VERSION}-anonymize-16", "${REGISTRY}/padmy:latest-anonymize-16"]
+}
+
+target "pg17-anonymize" {
+  inherits = ["_common"]
+  args     = { PG_VERSION = "17", UV_PARAMS = "--extra anonymize" }
+  tags     = ["${REGISTRY}/padmy:${VERSION}-anonymize-17", "${REGISTRY}/padmy:latest-anonymize-17"]
+}
+
+target "pg18-anonymize" {
+  inherits = ["_common"]
+  args     = { PG_VERSION = "18", UV_PARAMS = "--extra anonymize" }
+  tags     = ["${REGISTRY}/padmy:${VERSION}-anonymize-18", "${REGISTRY}/padmy:latest-anonymize-18"]
 }
