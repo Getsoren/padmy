@@ -32,6 +32,13 @@ dependencies = [
     "pytz >=2024.1,<2025.0 ; python_version < '3.12'"
 ]
 
+# Published extras so consumers can `pip install padmy[anonymize]`.
+# The matching [dependency-groups] entry below stays for local uv workflows.
+[project.optional-dependencies]
+anonymize = [
+    "Faker >=13.15.1,<14.0.0",
+]
+
 
 [dependency-groups]
 dev = [
