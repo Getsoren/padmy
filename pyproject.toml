@@ -1,6 +1,6 @@
 [project]
 name = "padmy"
-version = "0.28.0"
+version = "0.29.0"
 authors = [
     { email = "julien.brayere@soren.fr" }
 ]
@@ -98,7 +98,7 @@ useLibraryCodeForTypes = true
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.28.0"
+version = "0.29.0"
 tag_format = "$version"
 version_files = [
     "pyproject.toml:version"
