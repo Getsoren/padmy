@@ -31,6 +31,8 @@ class AnoFields:
     column: str
     type: FieldType
     extra_args: dict | None = None
+    # Generate values through faker.unique (for columns with a unique constraint)
+    unique: bool = False
 
     @classmethod
     def load(cls, data: dict):
@@ -38,12 +40,14 @@ class AnoFields:
             column = next(iter(data))
             _type = data[column]
             extra_args = None
+            unique = False
         else:
             column = data.pop("column")
             _type = data.pop("type")
+            unique = data.pop("unique", False)
             extra_args = data if data else None
 
-        return AnoFields(column=column, type=_type, extra_args=extra_args)
+        return AnoFields(column=column, type=_type, extra_args=extra_args, unique=unique)
 
 
 @dataclass
