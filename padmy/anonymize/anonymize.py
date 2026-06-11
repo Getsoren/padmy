@@ -11,6 +11,7 @@ import asyncpg
 
 if TYPE_CHECKING:
     from faker import Faker
+    from faker.proxy import UniqueProxy
 
 from padmy.logs import logs
 from ..config import Config, ConfigTable, FieldType, AnoFields
@@ -36,7 +37,7 @@ def get_update_query(table: str, pks: list[str], fields: list[str], field_types:
     return query
 
 
-def _get_fake_value(faker: Faker, field: FieldType, extra_fields: dict | None = None) -> Any:
+def _get_fake_value(faker: Faker | UniqueProxy, field: FieldType, extra_fields: dict | None = None) -> Any:
     _extra_fields = extra_fields or {}
     match field:
         case "EMAIL":
@@ -66,7 +67,7 @@ def _get_fake_value(faker: Faker, field: FieldType, extra_fields: dict | None = 
 
 def gen_mock_data(faker: Faker, fields: list[AnoFields], size: int) -> Iterator[dict]:
     for _ in range(size):
-        yield {v.column: _get_fake_value(faker, v.type, v.extra_args) for v in fields}
+        yield {v.column: _get_fake_value(faker.unique if v.unique else faker, v.type, v.extra_args) for v in fields}
 
 
 def dict_to_tuple(d: dict, fields: list[str]) -> tuple:

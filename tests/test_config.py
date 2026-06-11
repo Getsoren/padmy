@@ -98,6 +98,38 @@ def get_custom_fields_expected():
     return expected
 
 
+CONFIG_UNIQUE_FIELDS = """
+tables:
+  - schema: public
+    table: table_1
+    fields:
+      - column: bar
+        type: EMAIL
+        unique: true
+        domain_name: soren.fr
+"""
+
+
+def get_unique_fields_expected():
+    expected = Config(
+        tables=[
+            ConfigTable(
+                schema="public",
+                table="table_1",
+                fields=[
+                    AnoFields(
+                        column="bar",
+                        type="EMAIL",
+                        extra_args={"domain_name": "soren.fr"},
+                        unique=True,
+                    )
+                ],
+            ),
+        ],
+    )
+    return expected
+
+
 CONFIG_IGNORE = """
 tables:
   - schema: public
@@ -121,6 +153,7 @@ def get_ignore_table_expected():
         pytest.param(CONFIG_LITE, get_config_lite_expected(), id="Config lite"),
         pytest.param(CONFIG_FULL, get_config_full_expected(), id="Config full"),
         pytest.param(CONFIG_CUSTOM_TABLE_FIELDS, get_custom_fields_expected(), id="Custom fields"),
+        pytest.param(CONFIG_UNIQUE_FIELDS, get_unique_fields_expected(), id="Unique fields"),
         pytest.param(CONFIG_IGNORE, get_ignore_table_expected(), id="Config ignore"),
     ],
 )

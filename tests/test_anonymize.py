@@ -98,6 +98,16 @@ def test_get_fake_value(faker, field_type, extra, predicate):
     assert predicate(value), f"unexpected value for {field_type}: {value!r}"
 
 
+def test_gen_mock_data_unique(faker):
+    """unique fields never repeat a value, even across chunks (see users_email_key incident)."""
+    from padmy.anonymize.anonymize import gen_mock_data
+    from padmy.config import AnoFields
+
+    fields = [AnoFields(column="email", type="EMAIL", unique=True)]
+    values = [row["email"] for _ in range(5) for row in gen_mock_data(faker, fields=fields, size=200)]
+    assert len(set(values)) == len(values)
+
+
 def test_get_fake_value_unknown_type_raises(faker):
     from padmy.anonymize.anonymize import _get_fake_value
 
