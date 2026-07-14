@@ -71,10 +71,6 @@ def gen_mock_data(faker: Faker, fields: list[AnoFields], size: int) -> Iterator[
         yield {v.column: _get_fake_value(faker.unique if v.unique else faker, v.type, v.extra_args) for v in fields}
 
 
-def dict_to_tuple(d: dict, fields: list[str]) -> tuple:
-    return tuple(d[k] for k in fields)
-
-
 async def anonymize_table(
     conn: asyncpg.Connection,
     table: ConfigTable,
@@ -92,28 +88,35 @@ async def anonymize_table(
 
     fields = [x.column for x in table.fields]
     columns_type = await load_columns_type(conn, table.schema, table.table, pks + fields)
-    update_query = get_update_query(table.full_name, pks, fields, {k: v.sql_type for k, v in columns_type.items()})
-    max_lengths = {k: v.max_length for k, v in columns_type.items() if v.max_length is not None}
+    sql_types: dict[str, str] = {}
+    max_lengths: dict[str, int] = {}
+    for _column, _type in columns_type.items():
+        sql_types[_column] = _type.sql_type
+        if _type.max_length is not None:
+            max_lengths[_column] = _type.max_length
+    update_query = get_update_query(table.full_name, pks, fields, sql_types)
 
     _warned: set[str] = set()
 
-    def _fit(row: dict) -> dict:
+    def _fit(field: str, value: Any) -> Any:
         """Truncates generated strings to the column's max length (eg. phone numbers in varchar(15))."""
-        for k, v in row.items():
-            _max_length = max_lengths.get(k)
-            if _max_length is not None and isinstance(v, str) and len(v) > _max_length:
-                if k not in _warned:
-                    _warned.add(k)
-                    logs.warning(f"{table.full_name}.{k}: truncating generated values to {_max_length} chars")
-                row[k] = v[:_max_length]
-        return row
+        _max_length = max_lengths.get(field)
+        if _max_length is None or not isinstance(value, str) or len(value) <= _max_length:
+            return value
+        if field not in _warned:
+            _warned.add(field)
+            logs.warning(f"{table.full_name}.{field}: truncating generated values to {_max_length} chars")
+        return value[:_max_length]
+
+    def _to_row(pk_values: asyncpg.Record, mock: dict) -> tuple:
+        return tuple(pk_values[k] for k in pks) + tuple(_fit(k, mock[k]) for k in fields)
 
     async with conn.transaction():
         # aclosing so the cursor generator is closed on error while the connection is still usable
         async with contextlib.aclosing(iterate_pg(conn, query, chunk_size=chunk_size)) as chunks:
             async for chunk in chunks:
-                mock_data = gen_mock_data(faker, fields=table.fields, size=chunk_size)
-                new_data = [dict_to_tuple({**c, **_fit(m)}, pks + fields) for c, m in zip(chunk, mock_data)]
+                mock_data = gen_mock_data(faker, fields=table.fields, size=len(chunk))
+                new_data = [_to_row(c, m) for c, m in zip(chunk, mock_data)]
                 await conn.executemany(update_query, new_data)
 
 
