@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from importlib import reload
 from pathlib import Path
-from typing import Sequence, AsyncIterator, Callable, TypeVar, cast, Literal
+from typing import Sequence, AsyncGenerator, AsyncIterator, Callable, TypeVar, cast, Literal
 
 import asyncpg
 from asyncpg import Connection
@@ -359,7 +359,7 @@ async def iterate_pg(
     from_offset: int = 0,
     chunk_size: int = 500,
     timeout: int | None = None,
-) -> AsyncIterator[list[asyncpg.Record]]:
+) -> AsyncGenerator[list[asyncpg.Record], None]:
     async with conn.transaction():
         cur: asyncpg.connection.cursor.Cursor = await conn.cursor(query, *args)
         if from_offset:

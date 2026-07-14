@@ -78,6 +78,65 @@ def test_anonymize_table(aengine, loop, engine, faker):
     ]
 
 
+@pytest.fixture()
+def setup_ano_types_table(engine):
+    engine.execute(
+        """
+        DROP TABLE IF EXISTS public.ano_types;
+        DROP TYPE IF EXISTS public.ano_address;
+        CREATE TYPE public.ano_address AS (street TEXT, zipcode TEXT);
+        CREATE TABLE public.ano_types
+        (
+            id    SERIAL PRIMARY KEY,
+            addr  public.ano_address,
+            phone VARCHAR(15)
+        );
+        """
+    )
+    insert_many(engine, "public.ano_types", [{"id": i, "phone": "0611223344"} for i in range(5)])
+    engine.execute("UPDATE public.ano_types SET addr = ('street', 'zip')::public.ano_address")
+    engine.commit()
+    yield
+    engine.execute("DROP TABLE IF EXISTS public.ano_types; DROP TYPE IF EXISTS public.ano_address")
+    engine.commit()
+
+
+@pytest.mark.usefixtures("setup_ano_types_table")
+def test_load_columns_type(aengine, loop):
+    """format_type-based introspection returns castable types (not 'USER-DEFINED') and varchar max lengths."""
+    from padmy.db import load_columns_type, ColumnType
+
+    types = loop.run_until_complete(load_columns_type(aengine, "public", "ano_types", ["id", "addr", "phone"]))
+    assert types == {
+        "id": ColumnType("integer"),
+        "addr": ColumnType("ano_address"),
+        "phone": ColumnType("character varying(15)", max_length=15),
+    }
+
+
+@pytest.mark.usefixtures("setup_ano_types_table")
+def test_anonymize_table_composite_and_max_length(aengine, loop, engine, faker):
+    """Composite-typed columns get a valid cast and generated values are truncated to fit varchar(n)."""
+    from padmy.anonymize.anonymize import anonymize_table
+    from padmy.config import ConfigTable, AnoFields
+
+    table = ConfigTable(
+        "public",
+        "ano_types",
+        fields=[
+            AnoFields(column="addr", type="NULL"),
+            AnoFields(column="phone", type="PHONE_NUMBER"),
+        ],
+    )
+
+    loop.run_until_complete(anonymize_table(aengine, table, ["id"], faker))
+
+    db = fetch_all(engine, "SELECT addr, phone FROM public.ano_types")
+    assert len(db) == 5
+    assert all(x["addr"] is None for x in db)
+    assert all(x["phone"] and len(x["phone"]) <= 15 and x["phone"] != "0611223344" for x in db)
+
+
 @pytest.mark.parametrize(
     "field_type, extra, predicate",
     [
@@ -147,3 +206,25 @@ def test_anonymize_db(apool, engine, loop, faker):
         {"foo": "achang@my-domain.fr", "id": 1},
         {"foo": "greenwilliam@my-domain.fr", "id": 2},
     ]
+
+
+@pytest.mark.usefixtures("add_table_1_data")
+def test_anonymize_db_surfaces_table_errors(apool, engine, loop, faker):
+    """A failing table raises an explicit error and does not prevent the other tables from completing."""
+    from padmy.anonymize import anonymize_db
+    from padmy.config import Config, ConfigTable, AnoFields
+
+    config = Config(
+        tables=[
+            ConfigTable("public", "table_1", fields=[AnoFields(column="foo", type="EMAIL")]),
+            ConfigTable("public", "table_1", fields=[AnoFields(column="does_not_exist", type="EMAIL")]),
+        ]
+    )
+
+    with pytest.raises(ExceptionGroup, match="Could not anonymize 1 table") as exc_info:
+        loop.run_until_complete(anonymize_db(apool, config, faker))
+
+    assert len(exc_info.value.exceptions) == 1
+
+    db = fetch_all(engine, "SELECT foo FROM public.table_1")
+    assert all("@" in x["foo"] for x in db)
