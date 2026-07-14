@@ -127,11 +127,15 @@ class Table:
     def count(self, v: int):
         self._count = v
 
-    def get_values(self, table: str | None = None):
+    @property
+    def insert_columns(self) -> list[str]:
         if self.columns is None:
             raise ValueError("Columns must be loaded first")
+        return sorted(x.name for x in self.columns if not x.is_generated)
+
+    def get_values(self, table: str | None = None):
         _table = f"{table}." if table is not None else ""
-        return ", ".join(sorted([f'{_table}"{x.name}"' for x in self.columns if not x.is_generated]))
+        return ", ".join(f'{_table}"{name}"' for name in self.insert_columns)
 
     @property
     def values(self):
