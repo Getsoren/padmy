@@ -223,6 +223,44 @@ def setup_3_simple_tables(engine, sample_engine):
     sample_engine.commit()
 
 
+@pytest.fixture()
+def setup_multi_fk_tables(engine, sample_engine):
+    query = """
+    DROP SCHEMA IF EXISTS tmptest CASCADE;
+    CREATE SCHEMA tmptest;
+    CREATE TABLE IF NOT EXISTS tmptest.table_1
+    (
+        id  SERIAL PRIMARY KEY,
+        foo TEXT NOT NULL
+    );
+
+    -- Two FK paths to the same parent (new table name to avoid reusing the
+    -- session connection's cached statements on a different table shape)
+    CREATE TABLE IF NOT EXISTS tmptest.table_4
+    (
+        id            SERIAL PRIMARY KEY,
+        table_1_id    INT REFERENCES tmptest.table_1 ON DELETE CASCADE,
+        table_1_bis_id INT REFERENCES tmptest.table_1 ON DELETE CASCADE
+    );
+    """
+    engine.execute(query)
+    engine.commit()
+    table_1 = [
+        {
+            "id": i,
+            "foo": f"foo-{i}",
+        }
+        for i in range(10)
+    ]
+    table_4 = [{"id": 0, "table_1_id": 0, "table_1_bis_id": 1}]
+
+    insert_many(engine, "tmptest.table_1", table_1)
+    insert_many(engine, "tmptest.table_4", table_4)
+
+    sample_engine.execute(query)
+    sample_engine.commit()
+
+
 @pytest.mark.parametrize(
     "patch_scenario, sample_size, expected",
     [
@@ -263,6 +301,18 @@ def setup_3_simple_tables(engine, sample_engine):
                 "_tmptest_table_3_tmp": [],
             },
             id="3 tables, parent sample too small",
+        ),
+        pytest.param(
+            "setup_multi_fk_tables",
+            {
+                "tmptest.table_1": 0,
+                "tmptest.table_4": 100,
+            },
+            {
+                "_tmptest_table_1_tmp": [{"id": 0, "foo": "foo-0"}, {"id": 1, "foo": "foo-1"}],
+                "_tmptest_table_4_tmp": [{"id": 0, "table_1_id": 0, "table_1_bis_id": 1}],
+            },
+            id="2 fk paths to the same parent, both referenced parents kept",
         ),
     ],
 )

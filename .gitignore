@@ -155,7 +155,7 @@ cython_debug/
 
 requirements.txt
 image.tar
-scratch/
+.scratch/
 
 
 .claude/

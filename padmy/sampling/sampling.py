@@ -1,5 +1,7 @@
+import asyncio
 import contextlib
 import tempfile
+from collections.abc import Callable
 from math import floor
 from typing import cast, Literal
 
@@ -72,33 +74,32 @@ def copy_database(
             )
 
 
-def get_insert_child_fk_data_query(table: Table, child_table: Table) -> str:
+def get_insert_child_fk_data_queries(table: Table, child_table: Table) -> list[str]:
     """
-    Gets the query to insert data from a table to the temporary table.
+    Gets the queries inserting into the temporary table the rows of `table` that are
+    referenced by `child_table`'s temporary table, one query per foreign key.
+    Running each FK path as a semi-join (instead of chaining inner joins in a single
+    query) keeps the row count bounded by the table size and keeps rows referenced
+    by only some of the paths.
     """
-    joins = []
 
-    def _fk_join(tmp_name: str, fk: FKConstraint, fk_index: int) -> str:
-        return f"inner join {tmp_name} _s{fk_index} on " + " and ".join(
-            f"_s{fk_index}.{column_name} = t.{foreign_column_name}"
+    def _fk_exists(fk: FKConstraint) -> str:
+        conditions = " and ".join(
+            f"_s.{column_name} = t.{foreign_column_name}"
             for column_name, foreign_column_name in zip(fk.column_names, fk.foreign_column_names)
         )
+        return f"where exists(select from {child_table.tmp_name} _s where {conditions})"
 
-    for i, _fk in enumerate(child_table.foreign_keys):
-        if _fk.foreign_full_name != table.full_name:
-            continue
-        joins.append(_fk_join(child_table.tmp_name, _fk, i))
-
-    query = (
+    return [
         f"""
     INSERT INTO {table.tmp_name} ({table.values})
     SELECT {table.get_values("t")} from {table.full_name} t
+    {_fk_exists(_fk)}
+    ON CONFLICT DO NOTHING
     """
-        + "\n".join(joins)
-        + "\n ON CONFLICT DO NOTHING"
-    )
-
-    return query
+        for _fk in child_table.foreign_keys
+        if _fk.foreign_full_name == table.full_name
+    ]
 
 
 def get_insert_data_query(table: Table):
@@ -113,17 +114,28 @@ def get_insert_data_query(table: Table):
     return query
 
 
-async def _insert_leaf_table(conn: asyncpg.Connection, table: Table, table_size: int):
+async def _insert_full_table(conn: asyncpg.Connection, table: Table):
     query = f"CREATE TEMP TABLE {table.tmp_name} ON COMMIT DROP AS SELECT * from {table.full_name}"
-    args = []
-    # if table_size > 0:
+    logs.debug(f"Full copy query: {query}")
+    await conn.execute(query)
+
+
+async def _insert_leaf_table(conn: asyncpg.Connection, table: Table, table_size: int):
+    if table_size >= table.count:
+        await _insert_full_table(conn, table)
+        return
+    query = f"CREATE TEMP TABLE {table.tmp_name} ON COMMIT DROP AS SELECT * from {table.full_name}"
     query = f"{query} TABLESAMPLE SYSTEM_ROWS($1)"
-    args.append(table_size)
-    logs.debug(f"{query} {args}")
-    await conn.execute(query, *args)
+    logs.debug(f"{query} [{table_size}]")
+    await conn.execute(query, table_size)
 
 
 async def _insert_node_table(conn: asyncpg.Connection, table: Table, table_size: int):
+    # sample=100: a full copy satisfies every child FK, no need for the closure joins
+    if table_size >= table.count:
+        await _insert_full_table(conn, table)
+        return
+
     # Creating the table
     query = f"CREATE TEMP TABLE {table.tmp_name} (LIKE {table.full_name} INCLUDING ALL) ON COMMIT DROP"
     logs.debug(f"Create node table query: {query}")
@@ -131,9 +143,9 @@ async def _insert_node_table(conn: asyncpg.Connection, table: Table, table_size:
 
     # Inserting data from child table
     for _child_table in table.child_tables_safe:
-        query = get_insert_child_fk_data_query(table, _child_table)
-        logs.debug(f"Insert child data query: {query}")
-        await conn.execute(query)
+        for query in get_insert_child_fk_data_queries(table, _child_table):
+            logs.debug(f"Insert child data query: {query}")
+            await conn.execute(query)
 
     count = cast(int | None, await conn.fetchval(f"SELECT count(*) from {table.tmp_name}"))
     if count is None:
@@ -245,6 +257,52 @@ async def create_temp_tables(
         _tables = _parent_tables
 
 
+async def copy_table_data(
+    conn: asyncpg.Connection,
+    target_conn: asyncpg.Connection,
+    table: Table,
+    *,
+    on_rows_copied: Callable[[int], None] | None = None,
+):
+    """
+    Streams the content of the table's temporary table into the target database
+    using COPY on both sides. `on_rows_copied` is called with the (approximate)
+    number of rows in each streamed chunk.
+    """
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=16)
+
+    async def _sink(data: bytes):
+        await queue.put(bytes(data))
+
+    async def _produce():
+        try:
+            await conn.copy_from_query(f"SELECT {table.values} from {table.tmp_name}", output=_sink)
+        finally:
+            await queue.put(None)
+
+    async def _chunks():
+        while (chunk := await queue.get()) is not None:
+            if on_rows_copied is not None:
+                # In COPY text format, unescaped newlines only terminate rows
+                on_rows_copied(chunk.count(b"\n"))
+            yield chunk
+
+    producer = asyncio.create_task(_produce())
+    try:
+        await target_conn.copy_to_table(
+            table.table,
+            source=_chunks(),
+            columns=table.insert_columns,
+            schema_name=table.schema,
+        )
+    except BaseException:
+        producer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await producer
+        raise
+    await producer
+
+
 async def sample_database(
     conn: asyncpg.Connection,
     target_conn: asyncpg.Connection,
@@ -254,6 +312,9 @@ async def sample_database(
     chunk_size: int = 5_000,
     # Deactivate triggers on reinserting to new database
     no_trigger: bool = True,
+    # Transfer using COPY. Set to False to fall back to chunked inserts
+    # with ON CONFLICT DO NOTHING (eg. if the target tables are not empty)
+    use_copy: bool = True,
 ):
     """
     From top table to bottom
@@ -301,17 +362,23 @@ async def sample_database(
                     logs.debug(f"Inserting to {table.full_name}")
                     if task2 is not None:
                         progress.reset(task2, total=_table_count[table.tmp_name])
-                    query = f"SELECT {table.values} from {table.tmp_name}"
 
-                    async for chunk in iterate_pg(conn, query, chunk_size=chunk_size):
-                        logs.debug(f"{table.full_name} ({len(chunk)})")
-                        await insert_many(
-                            target_conn,
-                            table.full_name,
-                            [dict(x) for x in chunk],
-                            on_conflict="ON CONFLICT DO NOTHING",
-                            quote_columns=True,
+                    if use_copy:
+                        _on_rows_copied = (
+                            (lambda nb_rows: progress.update(task2, advance=nb_rows)) if task2 is not None else None
                         )
-                        if task2 is not None:
-                            progress.update(task2, advance=chunk_size)
+                        await copy_table_data(conn, target_conn, table, on_rows_copied=_on_rows_copied)
+                    else:
+                        query = f"SELECT {table.values} from {table.tmp_name}"
+                        async for chunk in iterate_pg(conn, query, chunk_size=chunk_size):
+                            logs.debug(f"{table.full_name} ({len(chunk)})")
+                            await insert_many(
+                                target_conn,
+                                table.full_name,
+                                [dict(x) for x in chunk],
+                                on_conflict="ON CONFLICT DO NOTHING",
+                                quote_columns=True,
+                            )
+                            if task2 is not None:
+                                progress.update(task2, advance=chunk_size)
                     progress.update(task1, advance=1)
