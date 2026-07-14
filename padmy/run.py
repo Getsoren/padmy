@@ -51,10 +51,11 @@ async def ano_main(
     pg_infos: PGConnectionInfo = Derived(get_pg_infos),
     db_name: str = Option(..., "--db", help="Database to anonymize"),
     config_path: Path = Option(..., "-f", "--file", help="Path to the configuration file"),
+    locale: str | None = Option(None, "--locale", help="Faker locale used to generate fake data (eg. fr_FR)"),
 ):
     if Faker is None:
         raise ImportError('Please install faker or padmy with "anonymize" to use this module')
-    faker = Faker()
+    faker = Faker(locale)
 
     config = Config.load_from_file(config_path)
     async with pg_infos.get_pool(db_name) as pool:

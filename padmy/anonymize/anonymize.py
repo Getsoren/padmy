@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import operator
 from functools import partial
@@ -70,10 +71,6 @@ def gen_mock_data(faker: Faker, fields: list[AnoFields], size: int) -> Iterator[
         yield {v.column: _get_fake_value(faker.unique if v.unique else faker, v.type, v.extra_args) for v in fields}
 
 
-def dict_to_tuple(d: dict, fields: list[str]) -> tuple:
-    return tuple(d[k] for k in fields)
-
-
 async def anonymize_table(
     conn: asyncpg.Connection,
     table: ConfigTable,
@@ -90,14 +87,37 @@ async def anonymize_table(
     query = f"SELECT {', '.join(pks)} from {table.schema}.{table.table}"
 
     fields = [x.column for x in table.fields]
-    fields_types = await load_columns_type(conn, table.schema, table.table, pks + fields)
-    update_query = get_update_query(table.full_name, pks, fields, fields_types)
+    columns_type = await load_columns_type(conn, table.schema, table.table, pks + fields)
+    sql_types: dict[str, str] = {}
+    max_lengths: dict[str, int] = {}
+    for _column, _type in columns_type.items():
+        sql_types[_column] = _type.sql_type
+        if _type.max_length is not None:
+            max_lengths[_column] = _type.max_length
+    update_query = get_update_query(table.full_name, pks, fields, sql_types)
+
+    _warned: set[str] = set()
+
+    def _fit(field: str, value: Any) -> Any:
+        """Truncates generated strings to the column's max length (eg. phone numbers in varchar(15))."""
+        _max_length = max_lengths.get(field)
+        if _max_length is None or not isinstance(value, str) or len(value) <= _max_length:
+            return value
+        if field not in _warned:
+            _warned.add(field)
+            logs.warning(f"{table.full_name}.{field}: truncating generated values to {_max_length} chars")
+        return value[:_max_length]
+
+    def _to_row(pk_values: asyncpg.Record, mock: dict) -> tuple:
+        return tuple(pk_values[k] for k in pks) + tuple(_fit(k, mock[k]) for k in fields)
 
     async with conn.transaction():
-        async for chunk in iterate_pg(conn, query, chunk_size=chunk_size):
-            mock_data = gen_mock_data(faker, fields=table.fields, size=chunk_size)
-            new_data = [dict_to_tuple({**c, **m}, pks + fields) for c, m in zip(chunk, mock_data)]
-            await conn.executemany(update_query, new_data)
+        # aclosing so the cursor generator is closed on error while the connection is still usable
+        async with contextlib.aclosing(iterate_pg(conn, query, chunk_size=chunk_size)) as chunks:
+            async for chunk in chunks:
+                mock_data = gen_mock_data(faker, fields=table.fields, size=len(chunk))
+                new_data = [_to_row(c, m) for c, m in zip(chunk, mock_data)]
+                await conn.executemany(update_query, new_data)
 
 
 async def anonymize_db(pool: asyncpg.Pool, config: Config, faker: Faker):
@@ -115,7 +135,9 @@ async def anonymize_db(pool: asyncpg.Pool, config: Config, faker: Faker):
         for _table_name, _table_pks in itertools.groupby(pks, operator.attrgetter("full_name"))
     }
 
-    await asyncio.gather(
+    # return_exceptions so one failing table does not cancel the others mid-query
+    # (cancellation used to surface as a misleading InterfaceError on pool release)
+    results = await asyncio.gather(
         *[
             get_conn(
                 pool,
@@ -127,5 +149,13 @@ async def anonymize_db(pool: asyncpg.Pool, config: Config, faker: Faker):
                 ),
             )
             for _table in _tables_to_anonymize
-        ]
+        ],
+        return_exceptions=True,
     )
+    errors = {
+        _table.full_name: _res for _table, _res in zip(_tables_to_anonymize, results) if isinstance(_res, BaseException)
+    }
+    for _table_name, _error in errors.items():
+        logs.error(f"Could not anonymize {_table_name!r}: {_error!r}")
+    if errors:
+        raise BaseExceptionGroup(f"Could not anonymize {len(errors)} table(s)", list(errors.values()))

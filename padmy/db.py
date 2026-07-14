@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import sys
 from dataclasses import dataclass, field
 
@@ -266,19 +265,36 @@ async def load_primary_keys(conn: PgConnection, schemas: list[str]):
     return [PKConstraint(**x) for x in data]
 
 
+# format_type gives a valid SQL type expression (composite types, arrays, varchar(n), ...),
+# unlike information_schema.columns.data_type which yields literals like 'USER-DEFINED'
 GET_COLUMNS_TYPE_QUERY = """
-SELECT 
-    column_name, data_type 
-FROM information_schema.columns 
-WHERE table_schema = $1 AND 
-      table_name = $2 AND 
-      column_name = ANY ($3::TEXT[])
+SELECT a.attname                            AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS data_type,
+       CASE
+           WHEN a.atttypid IN ('varchar'::regtype, 'bpchar'::regtype) AND a.atttypmod > 4
+               THEN a.atttypmod - 4
+           END                              AS max_length
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND a.attname = ANY ($3::TEXT[])
+  AND a.attnum > 0
+  AND NOT a.attisdropped
 """
+
+
+@dataclass
+class ColumnType:
+    sql_type: str
+    # character maximum length for varchar(n)/char(n) columns, None otherwise
+    max_length: int | None = None
 
 
 async def load_columns_type(conn: asyncpg.Connection, schema: str, table: str, columns: list[str]):
     data = await conn.fetch(GET_COLUMNS_TYPE_QUERY, schema, table, columns)
-    return functools.reduce(lambda p, n: {**p, **{n["column_name"]: n["data_type"]}}, data, {})
+    return {x["column_name"]: ColumnType(sql_type=x["data_type"], max_length=x["max_length"]) for x in data}
 
 
 @dataclass
