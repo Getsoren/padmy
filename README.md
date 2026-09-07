@@ -397,5 +397,5 @@ app.layout = viz.get_layout(g,
                             style={'width': '100%', 'height': '800px'},
                             layout='klay')
 
-app.run_server(mode='jupyterlab')  # or mode='inline'
+app.run(jupyter_mode='jupyterlab')  # or jupyter_mode='inline'
 ```
