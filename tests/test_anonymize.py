@@ -3,22 +3,23 @@ import textwrap
 import pytest
 from tracktolib.pg_sync import fetch_all, insert_many
 
+from padmy.config import AnoFields
+
 
 @pytest.mark.parametrize(
-    "table,pks,fields,field_types,expected",
+    "table,pks,fields,field_types,constants,expected",
     [
         pytest.param(
             "public.test",
             ["id1"],
             ["field_1"],
             {"id1": "text", "field_1": "integer"},
+            None,
             """
     UPDATE public.test AS u
     SET
       field_1 = u2.field_1
-    FROM (VALUES
-      ($1::TEXT, $2::INTEGER)
-    ) AS u2(id1, field_1)
+    FROM unnest($1::TEXT[], $2::INTEGER[]) AS u2(id1, field_1)
     WHERE u2.id1 = u.id1
     """,
             id="One PK",
@@ -28,23 +29,22 @@ from tracktolib.pg_sync import fetch_all, insert_many
             ["id1", "id2"],
             ["field_1", "field_2"],
             {"id1": "text", "id2": "text", "field_1": "integer", "field_2": "text"},
+            {"hash": "NULL"},
             """
     UPDATE public.test AS u
     SET
-      field_1 = u2.field_1, field_2 = u2.field_2
-    FROM (VALUES
-      ($1::TEXT, $2::TEXT, $3::INTEGER, $4::TEXT)
-    ) AS u2(id1, id2, field_1, field_2)
+      field_1 = u2.field_1, field_2 = u2.field_2, hash = NULL
+    FROM unnest($1::TEXT[], $2::TEXT[], $3::INTEGER[], $4::TEXT[]) AS u2(id1, id2, field_1, field_2)
     WHERE u2.id1 = u.id1 AND u2.id2 = u.id2
     """,
-            id="Multiple PKs",
+            id="Multiple PKs + constant",
         ),
     ],
 )
-def test_get_update_query(table, pks, fields, field_types, expected):
+def test_get_update_query(table, pks, fields, field_types, constants, expected):
     from padmy.anonymize.anonymize import get_update_query
 
-    query = get_update_query(table, pks, fields, field_types)
+    query = get_update_query(table, pks, fields, field_types, constants=constants)
     assert textwrap.dedent(query).strip().lower() == textwrap.dedent(expected).strip().lower()
 
 
@@ -146,6 +146,7 @@ def test_anonymize_table_composite_and_max_length(aengine, loop, engine, faker):
         pytest.param("LAST_NAME", None, lambda v: isinstance(v, str) and v, id="LAST_NAME"),
         pytest.param("NAME", None, lambda v: isinstance(v, str) and " " in v, id="NAME"),
         pytest.param("PHONE_NUMBER", None, lambda v: isinstance(v, str) and v, id="PHONE_NUMBER"),
+        pytest.param("NUMERIFY", {"text": "06########"}, lambda v: len(v) == 10 and v.isdigit(), id="NUMERIFY"),
         pytest.param("WORD", None, lambda v: isinstance(v, str) and v, id="WORD"),
     ],
 )
@@ -155,6 +156,38 @@ def test_get_fake_value(faker, field_type, extra, predicate):
 
     value = _get_fake_value(faker, field_type, extra)
     assert predicate(value), f"unexpected value for {field_type}: {value!r}"
+
+
+@pytest.mark.parametrize(
+    "fields, where, untouched_ids",
+    [
+        pytest.param([AnoFields(column="addr", type="NULL")], None, set(), id="constant only, set-based"),
+        pytest.param([AnoFields(column="addr", type="NULL")], "id < 2", {2, 3, 4}, id="constant only, where filter"),
+        pytest.param(
+            [AnoFields(column="phone", type="NUMERIFY", extra_args={"text": "06########"})],
+            "id <> 0",
+            {0},
+            id="faker, where filter",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("setup_ano_types_table")
+def test_anonymize_table_where(aengine, loop, engine, faker, fields, where, untouched_ids):
+    """`where` keeps the rows it excludes untouched on both the set-based and the faker path."""
+    from padmy.anonymize.anonymize import anonymize_table
+    from padmy.config import ConfigTable
+
+    table = ConfigTable("public", "ano_types", fields=fields, where=where)
+    loop.run_until_complete(anonymize_table(aengine, table, ["id"], faker))
+
+    column = fields[0].column
+    db = fetch_all(
+        engine,
+        "SELECT id FROM public.ano_types WHERE addr::text = '(street,zip)'"
+        if column == "addr"
+        else "SELECT id FROM public.ano_types WHERE phone = '0611223344'",
+    )
+    assert {x["id"] for x in db} == untouched_ids
 
 
 def test_gen_mock_data_unique(faker):

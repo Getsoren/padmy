@@ -11,6 +11,7 @@ FieldType = Literal[
     "LAST_NAME",
     "NAME",
     "PHONE_NUMBER",
+    "NUMERIFY",
     "DATE_OF_BIRTH",
     "TEXT",
     "WORD",
@@ -59,6 +60,8 @@ class ConfigTable:
     fields: list[AnoFields] = field(default_factory=list)
 
     ignore: bool = False
+    # SQL filter: only matching rows are anonymized (eg. keep internal accounts)
+    where: str | None = None
 
     def __post_init__(self):
         _check_sample_size(self.sample)
