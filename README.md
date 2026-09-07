@@ -115,9 +115,14 @@ to Faker generators (or `NULL` to blank the column). Available types:
 | `LAST_NAME` | `faker.last_name()` |
 | `NAME` | `faker.name()` (full name) |
 | `PHONE_NUMBER` | `faker.phone_number()` |
+| `NUMERIFY` | `faker.numerify()` — `text:` pattern, `#` = digit (eg. `"06########"` for a DB-constrained phone) |
 | `DATE_OF_BIRTH` | `faker.date_of_birth()` — supports `minimum_age:` / `maximum_age:` |
 | `TEXT` | `faker.text()` — supports `max_nb_chars:` |
 | `WORD` | `faker.word()` |
+
+`NULL` fields are applied in a single set-based `UPDATE`; Faker fields are generated in
+Python and pushed in chunked `UPDATE ... FROM unnest(...)` statements. A table can carry a
+`where:` SQL filter so the rows it excludes are left untouched (eg. internal accounts).
 
 Example config:
 
@@ -125,6 +130,7 @@ Example config:
 tables:
   - schema: public
     table: users
+    where: "email NOT LIKE '%@my-company.com'"   # optional: rows to leave as-is
     fields:
       - column: email
         type: EMAIL
