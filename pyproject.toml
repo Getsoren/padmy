@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
 ]
 
 
@@ -45,7 +46,7 @@ dev = [
     "pytest >=9.0.1,<10.0.0",
     "pytest-cov >=7.0.0,<8.0.0",
     "pyright >=1.1.407,<2.0.0",
-    "ruff >=0.14.5,<1.0.0",
+    "ruff >=0.14.5,<0.15.0",
     "deepdiff >=8.6.1,<9",
     "tracktolib >=0.46.0,<1.0.0",
     "psycopg >=3.2.12,<4.0.0",
@@ -54,8 +55,8 @@ dev = [
 
 network = [
     "networkx >=3.1.0,<4.0.0",
-    "dash >=2.6.0,<3.0.0",
-    "dash-cytoscape >=0.3.0,<1.0.0"
+    "dash >=3.0.0,<4.0.0",
+    "dash-cytoscape >=1.0.0,<2.0.0"
 ]
 
 bump = [
