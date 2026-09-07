@@ -42,7 +42,7 @@ def test_run_sample(capsys, loop):
         "--schemas",
         "public test",
         "--sample",
-        5,
+        "5",
         "--copy-db",
     )
     capsys.readouterr()
