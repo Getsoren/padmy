@@ -300,8 +300,9 @@ acknowledging it in its header:
 -- Rewrites: booking_items is small, run outside peak hours
 ```
 
-**Optional**: You can also check the migrations for operations that lock or rewrite existing tables
-(blocking index builds, validated foreign keys, `SET NOT NULL`, ...):
+**Optional**: You can also check the migrations for unsafe operations: statements that lock or rewrite existing
+tables (blocking index builds, validated foreign keys, `SET NOT NULL`, ...), missing `lock_timeout` /
+`statement_timeout`, and column types to avoid (`int`, `varchar(n)`, `timestamp`, ...):
 
 ```bash
 uvx --from 'padmy[lint]' padmy migrate lint --sql-dir /tmp/migrations
