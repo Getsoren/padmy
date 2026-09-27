@@ -36,6 +36,7 @@ PREFIXES = {
     "prev-file": "-- Prev-file:",
     "version": "-- Version:",
     "skip-verify": "-- Skip-verify:",
+    "no-transaction": "-- No-transaction:",
 }
 
 
@@ -50,6 +51,8 @@ class Header:
     version: str | None
     skip_verify: bool = False
     skip_reason: str | None = None
+    # runs outside the migration transaction (eg: CREATE INDEX CONCURRENTLY)
+    no_transaction: bool = False
 
     def __post_init__(self):
         if self.skip_verify and self.skip_reason is None:
@@ -57,7 +60,7 @@ class Header:
 
     @property
     def is_empty(self):
-        return not any([self.prev_file, self.author, self.version])
+        return not any([self.prev_file, self.author, self.version, self.no_transaction])
 
     @classmethod
     def from_text(cls, text: str):
@@ -66,6 +69,7 @@ class Header:
         version = None
         skip_verify = False
         skip_reason = None
+        no_transaction = False
         for line in text.split("\n"):
             if line.startswith(PREFIXES["prev-file"]):
                 prev_file = line.split(":")[1].strip()
@@ -76,7 +80,16 @@ class Header:
             elif line.startswith(PREFIXES["skip-verify"]):
                 skip_reason = line.split(":")[1].strip().lower()
                 skip_verify = True
-        return cls(prev_file, author, version, skip_verify=skip_verify, skip_reason=skip_reason)
+            elif line.startswith(PREFIXES["no-transaction"]):
+                no_transaction = True
+        return cls(
+            prev_file,
+            author,
+            version,
+            skip_verify=skip_verify,
+            skip_reason=skip_reason,
+            no_transaction=no_transaction,
+        )
 
     def as_text(self):
         _header = [
@@ -87,6 +100,8 @@ class Header:
             _header.append(f"{PREFIXES['version']} {self.version}")
         if self.skip_verify:
             _header.append(f"{PREFIXES['skip-verify']} {self.skip_reason or 'no reason provided'}")
+        if self.no_transaction:
+            _header.append(f"{PREFIXES['no-transaction']} true")
 
         file_header = textwrap.dedent("\n".join(_header)).strip()
         return file_header
@@ -107,6 +122,10 @@ class MigrationFile:
     @property
     def skip_verify(self) -> bool:
         return self.header.skip_verify if self.header else False
+
+    @property
+    def no_transaction(self) -> bool:
+        return self.header.no_transaction if self.header else False
 
     def replace_ts(self, ts: dt.datetime):
         self.ts = ts

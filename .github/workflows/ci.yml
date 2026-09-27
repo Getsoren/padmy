@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install dependencies
-        run: uv sync --locked --group dev --group network --group anonymize
+        run: uv sync --locked --group dev --group network --group anonymize --group lint
       - name: Install psql client
         run: |
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
