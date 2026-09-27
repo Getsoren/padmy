@@ -39,6 +39,9 @@ dependencies = [
 anonymize = [
     "Faker >=13.15.1,<14.0.0",
 ]
+lint = [
+    "pglast >=8.4,<9.0",
+]
 
 
 [dependency-groups]
@@ -67,6 +70,9 @@ notebook = [
 ]
 anonymize = [
     "Faker >=13.15.1,<14.0.0",
+]
+lint = [
+    "pglast >=8.4,<9.0",
 ]
 
 

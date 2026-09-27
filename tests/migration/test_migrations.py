@@ -16,6 +16,7 @@ from .conftest import (
     INVALID_MIGRATIONS_DIR,
     INVALID_MIGRATIONS_DIR_MULTIPLE,
     VALID_MIGRATIONS_SKIP_DIR,
+    VALID_MIGRATIONS_NO_TRANSACTION_DIR,
 )
 from ..conftest import PG_DATABASE
 from ..utils import check_table_exists, check_column_exists
@@ -530,6 +531,12 @@ _REPORT_HEADER = "-- Prev-file: 1-00000000-up.sql\n-- Author: foo@bar.baz\n"
             {"locked_tables": [], "rewritten_tables": [], "has_unacknowledged_rewrites": False},
             id="new table is not reported",
         ),
+        pytest.param(
+            "-- No-transaction: true\n",
+            "CREATE INDEX CONCURRENTLY test_foo_idx ON general.test (foo);",
+            None,
+            id="no-transaction migration is skipped",
+        ),
     ],
 )
 @pytest.mark.usefixtures("clean_migration", "setup_test_schema")
@@ -545,10 +552,14 @@ def test_migrate_report(engine, aengine, loop, tmp_path, header, sql, expected):
     loop.run_until_complete(migrate_setup(aengine))
     loop.run_until_complete(migrate_up(aengine, folder=tmp_path, nb_migrations=1))
 
-    (report,) = loop.run_until_complete(migrate_report(aengine, tmp_path))
+    reports = loop.run_until_complete(migrate_report(aengine, tmp_path))
 
-    assert {k: getattr(report, k) for k in expected} == expected
-    assert report.duration >= 0
+    if expected is None:
+        assert reports == []
+    else:
+        (report,) = reports
+        assert {k: getattr(report, k) for k in expected} == expected
+        assert report.duration >= 0
     assert len(fetch_all(engine, "SELECT * FROM public.migration")) == 1, "The report must roll back"
 
 
@@ -684,3 +695,21 @@ class TestMigrationFiles:
             assert verify_migration_files(migration_dir, raise_error=True) == e
 
         assert capsys.readouterr().out.strip()
+
+
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema", "setup")
+def test_migrate_up_down_no_transaction(engine, aengine, loop):
+    from padmy.migration import migrate_up, migrate_down
+
+    def _has_index():
+        return bool(fetch_all(engine, "SELECT 1 FROM pg_indexes WHERE indexname = 'test_foo_idx'"))
+
+    loop.run_until_complete(migrate_up(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert _has_index()
+    assert check_column_exists(engine, "general", "test", "baz")
+
+    loop.run_until_complete(migrate_down(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert not _has_index()
+    assert not check_table_exists(engine, "general", "test")
+    migrations = fetch_all(engine, "SELECT migration_type FROM public.migration")
+    assert [m["migration_type"] for m in migrations] == ["up"] * 3 + ["down"] * 3

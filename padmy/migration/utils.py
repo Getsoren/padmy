@@ -37,6 +37,7 @@ PREFIXES = {
     "version": "-- Version:",
     "skip-verify": "-- Skip-verify:",
     "rewrites": "-- Rewrites:",
+    "no-transaction": "-- No-transaction:",
 }
 
 
@@ -53,6 +54,8 @@ class Header:
     skip_reason: str | None = None
     rewrites_reason: str | None = None
     """Why the migration may rewrite existing tables (`-- Rewrites: <reason>`)."""
+    # runs outside the migration transaction (eg: CREATE INDEX CONCURRENTLY)
+    no_transaction: bool = False
 
     def __post_init__(self):
         if self.skip_verify and self.skip_reason is None:
@@ -60,7 +63,7 @@ class Header:
 
     @property
     def is_empty(self):
-        return not any([self.prev_file, self.author, self.version, self.rewrites_reason])
+        return not any([self.prev_file, self.author, self.version, self.rewrites_reason, self.no_transaction])
 
     @classmethod
     def from_text(cls, text: str):
@@ -70,6 +73,7 @@ class Header:
         skip_verify = False
         skip_reason = None
         rewrites_reason = None
+        no_transaction = False
         for line in text.split("\n"):
             if line.startswith(PREFIXES["prev-file"]):
                 prev_file = line.split(":")[1].strip()
@@ -82,6 +86,8 @@ class Header:
                 skip_verify = True
             elif line.startswith(PREFIXES["rewrites"]):
                 rewrites_reason = line.split(":", 1)[1].strip() or "no reason provided"
+            elif line.startswith(PREFIXES["no-transaction"]):
+                no_transaction = True
         return cls(
             prev_file,
             author,
@@ -89,6 +95,7 @@ class Header:
             skip_verify=skip_verify,
             skip_reason=skip_reason,
             rewrites_reason=rewrites_reason,
+            no_transaction=no_transaction,
         )
 
     def as_text(self):
@@ -102,6 +109,8 @@ class Header:
             _header.append(f"{PREFIXES['skip-verify']} {self.skip_reason or 'no reason provided'}")
         if self.rewrites_reason is not None:
             _header.append(f"{PREFIXES['rewrites']} {self.rewrites_reason}")
+        if self.no_transaction:
+            _header.append(f"{PREFIXES['no-transaction']} true")
 
         file_header = textwrap.dedent("\n".join(_header)).strip()
         return file_header
@@ -126,6 +135,10 @@ class MigrationFile:
     @property
     def rewrites_reason(self) -> str | None:
         return self.header.rewrites_reason if self.header else None
+
+    @property
+    def no_transaction(self) -> bool:
+        return self.header.no_transaction if self.header else False
 
     def replace_ts(self, ts: dt.datetime):
         self.ts = ts
