@@ -29,7 +29,7 @@ dependencies = [
     "asyncpg >=0.31.0,<1.0.0",
     "PyYAML >=6.0.2,<7.0",
     "typing-extensions >=4.3.0 ; python_version < '3.11'",
-    "tracktolib >=0.42.1,<1.0.0",
+    "tracktolib >=0.42.1,<2.0.0",
     "pytz >=2024.1,<2025.0 ; python_version < '3.12'"
 ]
 
@@ -48,7 +48,7 @@ dev = [
     "pyright >=1.1.407,<2.0.0",
     "ruff >=0.14.5,<0.15.0",
     "deepdiff >=8.6.1,<9",
-    "tracktolib >=0.46.0,<1.0.0",
+    "tracktolib >=0.46.0,<2.0.0",
     "psycopg >=3.2.12,<4.0.0",
     "pre-commit>=4.4.0",
 ]

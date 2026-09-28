@@ -1465,7 +1465,7 @@ requires-dist = [
     { name = "piou", specifier = ">=0.21.0,<1.0.0" },
     { name = "pytz", marker = "python_full_version < '3.12'", specifier = ">=2024.1,<2025.0" },
     { name = "pyyaml", specifier = ">=6.0.2,<7.0" },
-    { name = "tracktolib", specifier = ">=0.42.1,<1.0.0" },
+    { name = "tracktolib", specifier = ">=0.42.1,<2.0.0" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.3.0" },
 ]
 provides-extras = ["anonymize"]
@@ -1481,7 +1481,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.1,<10.0.0" },
     { name = "pytest-cov", specifier = ">=7.0.0,<8.0.0" },
     { name = "ruff", specifier = ">=0.14.5,<0.15.0" },
-    { name = "tracktolib", specifier = ">=0.46.0,<1.0.0" },
+    { name = "tracktolib", specifier = ">=0.46.0,<2.0.0" },
 ]
 network = [
     { name = "dash", specifier = ">=3.0.0,<4.0.0" },
@@ -2197,11 +2197,11 @@ wheels = [
 
 [[package]]
 name = "tracktolib"
-version = "0.74.0"
+version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0a/9a/a01f81aa6399971de9c5a9fae26c258f705beb60db26befdb8034e02c03c/tracktolib-0.74.0.tar.gz", hash = "sha256:4fcc6d1225ac40590376328f198ff5b861d851685b9db372167b9bb86197cc38", size = 50360, upload-time = "2026-02-26T20:33:12.107Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/9c/9a9959a3a42a0e00f7a1dd2a782e788b617cc6bb9a32994ab6845a13ccab/tracktolib-1.1.1.tar.gz", hash = "sha256:cec83a013c4393aae5599c59c8f03a6cb405215fe2df7e68b23150d14f998c10", size = 36938, upload-time = "2026-09-28T12:46:50.872Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/e4/476c23cae02f8d2df43face6b9ac470d7094fe1ac93ef06a68b1a349c7f6/tracktolib-0.74.0-py3-none-any.whl", hash = "sha256:196257eb51d172e2caeaf6f36710ccedc0058a514c9c18a0844d355a87995818", size = 60750, upload-time = "2026-02-26T20:33:11.003Z" },
+    { url = "https://files.pythonhosted.org/packages/37/1d/3b274ddfafb50bccadbcb7db4ee1ed54e0a46f0e3266409bf738853a3263/tracktolib-1.1.1-py3-none-any.whl", hash = "sha256:b5378b366ef198156d03b1e407d5bea05bb4281938c4156f7969be248fd19d0b", size = 43828, upload-time = "2026-09-28T12:46:49.667Z" },
 ]
 
 [[package]]
