@@ -67,11 +67,19 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ vars.HABIOPS_APP_ID }}
+          private-key: ${{ secrets.HABIOPS_APP_KEY }}
+          owner: Getsoren
+          repositories: ${{ github.event.repository.name }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-          token: ${{ secrets.SOREN_PAT }}
+          token: ${{ steps.app-token.outputs.token }}
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Install bump tools
         run: uv sync --locked --group bump
