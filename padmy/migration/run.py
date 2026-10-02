@@ -180,3 +180,40 @@ async def verify_migrations(
 
     async with pg_infos.get_conn() as conn:
         await verify_migrations(conn, migrations_dir)
+
+
+@migration.command(cmd="lint", help="Check migrations for unsafe operations")
+def lint_cmd(
+    sql_dir: Path | None = Option(MIGRATION_DIR, "--sql-dir", help="Directory containing the migration files"),
+    files: list[Path] | None = Option(None, "-f", "--files", help="Files to lint (defaults to every up file)"),
+):
+    """
+    Reports locking or rewriting operations, missing timeouts and column types to avoid.
+    Silence a rule for a file with a `-- padmy-lint: ignore rule-a, rule-b` comment.
+    """
+    try:
+        from pglast.parser import ParseError
+
+        from .lint import lint_file
+    except ImportError:
+        raise CommandError('Please install pglast or padmy with "lint" to use this command')
+    from .utils import get_files
+
+    if files:
+        paths = files
+    elif sql_dir:
+        paths = [f.path for f in get_files(sql_dir, up_only=True)]
+    else:
+        raise CommandError("Pass --sql-dir or --files")
+    nb_findings = 0
+    for path in paths:
+        try:
+            findings = lint_file(path)
+        except ParseError as e:
+            raise CommandError(f"Failed to parse {path}: {e}")
+        for finding in findings:
+            CONSOLE.print(f"[yellow]{path}:{finding.line}[/yellow] [bold]{finding.rule}[/bold] {finding.message}")
+        nb_findings += len(findings)
+    if nb_findings:
+        raise CommandError(f"Found {nb_findings} unsafe operation(s)")
+    CONSOLE.print("[green]No unsafe operations found[/green]")

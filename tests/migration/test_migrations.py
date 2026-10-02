@@ -15,6 +15,7 @@ from .conftest import (
     INVALID_MIGRATIONS_DIR,
     INVALID_MIGRATIONS_DIR_MULTIPLE,
     VALID_MIGRATIONS_SKIP_DIR,
+    VALID_MIGRATIONS_NO_TRANSACTION_DIR,
 )
 from ..conftest import PG_DATABASE
 from ..utils import check_table_exists, check_column_exists
@@ -570,3 +571,21 @@ class TestMigrationFiles:
             assert verify_migration_files(migration_dir, raise_error=True) == e
 
         assert capsys.readouterr().out.strip()
+
+
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema", "setup")
+def test_migrate_up_down_no_transaction(engine, aengine, loop):
+    from padmy.migration import migrate_up, migrate_down
+
+    def _has_index():
+        return bool(fetch_all(engine, "SELECT 1 FROM pg_indexes WHERE indexname = 'test_foo_idx'"))
+
+    loop.run_until_complete(migrate_up(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert _has_index()
+    assert check_column_exists(engine, "general", "test", "baz")
+
+    loop.run_until_complete(migrate_down(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert not _has_index()
+    assert not check_table_exists(engine, "general", "test")
+    migrations = fetch_all(engine, "SELECT migration_type FROM public.migration")
+    assert [m["migration_type"] for m in migrations] == ["up"] * 3 + ["down"] * 3

@@ -276,6 +276,31 @@ We are all good !
 uvx padmy -vv migrate verify-files --sql-dir /tmp/migrations --no-raise
 ```
 
+**Optional**: You can also check the migrations for unsafe operations: statements that lock or rewrite existing
+tables (blocking index builds, validated foreign keys, `SET NOT NULL`, ...), missing `lock_timeout` /
+`statement_timeout`, and column types to avoid (`int`, `varchar(n)`, `timestamp`, ...):
+
+```bash
+uvx --from 'padmy[lint]' padmy migrate lint --sql-dir /tmp/migrations
+```
+
+Silence a rule for one file with a `-- padmy-lint: ignore drop-column, rename` comment.
+
+**Running outside a transaction**: migrations are applied in a transaction, so statements like
+`CREATE INDEX CONCURRENTLY` fail. Put such a statement alone in its own migration with a `-- No-transaction:` header:
+
+```sql
+-- Prev-file: ...
+-- Author: ...
+-- No-transaction: true
+
+CREATE INDEX CONCURRENTLY test_foo_idx ON general.test (foo);
+```
+
+The file must hold a single statement (Postgres runs several in one implicit transaction), and it is not rolled
+back if a later migration fails. If the statement itself fails, it may leave an invalid index behind: drop it
+(`DROP INDEX CONCURRENTLY ...`) before running the migration again.
+
 ## 5. Comparing databases schemas
 
 You can compare two databases by running:

@@ -6,6 +6,8 @@ import functools
 import textwrap
 import typing
 from contextlib import nullcontext
+from itertools import groupby
+from operator import attrgetter
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -236,12 +238,20 @@ async def get_migration_files(
     return migrations_to_apply
 
 
+NO_TRANSACTION_FAILURE_MSG = (
+    "This migration ran outside a transaction and was not rolled back: "
+    "drop what it left behind (eg: an invalid index) before running it again"
+)
+
+
 async def apply_migration(conn: asyncpg.Connection, migration: MigrationFile, metadata: dict | None = None):
     logs.info(f"Running {migration.path.name} (ts: {migration.ts})...")
     try:
         await exec_file(conn, migration.path)
     except Exception as e:
         logs.error(f'Failed to execute migration_id "{migration.file_id}" ({e})')
+        if migration.no_transaction:
+            logs.error(NO_TRANSACTION_FAILURE_MSG)
         raise e
     migration_data = {
         "file_ts": migration.ts,
@@ -271,11 +281,11 @@ async def migrate_up(
         logs.info("No migrations to apply")
         return False
 
-    _transaction = conn.transaction if use_transaction else nullcontext
     logs.info(f"Found {len(migration_files)} migrations to apply")
-    async with _transaction():
-        for _migration in migration_files:
-            await apply_migration(conn, _migration, metadata)
+    for _no_transaction, _migrations in groupby(migration_files, key=attrgetter("no_transaction")):
+        async with conn.transaction() if use_transaction and not _no_transaction else nullcontext():
+            for _migration in _migrations:
+                await apply_migration(conn, _migration, metadata)
     logs.info("Done!")
     return True
 
@@ -360,26 +370,28 @@ async def migrate_down(
         logs.info("No rollback files to apply")
         return False
 
-    _transaction = conn.transaction if use_transaction else nullcontext
     logs.info(f"Found {nb_files} rollback files to apply")
-    async with _transaction():
-        for _rollback in rollback_files:
-            logs.info(f"Running {_rollback.path.name}...")
-            try:
-                await exec_file(conn, _rollback.path)
-            except Exception as e:
-                logs.error(f'Failed to execute migration_id "{_rollback.file_id}"')
-                raise e
+    for _no_transaction, _rollbacks in groupby(rollback_files, key=attrgetter("no_transaction")):
+        async with conn.transaction() if use_transaction and not _no_transaction else nullcontext():
+            for _rollback in _rollbacks:
+                logs.info(f"Running {_rollback.path.name}...")
+                try:
+                    await exec_file(conn, _rollback.path)
+                except Exception as e:
+                    logs.error(f'Failed to execute migration_id "{_rollback.file_id}"')
+                    if _rollback.no_transaction:
+                        logs.error(NO_TRANSACTION_FAILURE_MSG)
+                    raise e
 
-            migration_data = {
-                "file_ts": _rollback.ts,
-                "file_id": _rollback.file_id,
-                "migration_type": "down",
-                "file_name": _rollback.path.name,
-            }
-            if metadata:
-                migration_data["meta"] = metadata
-            await insert_one(conn, "public.migration", migration_data)
+                migration_data = {
+                    "file_ts": _rollback.ts,
+                    "file_id": _rollback.file_id,
+                    "migration_type": "down",
+                    "file_name": _rollback.path.name,
+                }
+                if metadata:
+                    migration_data["meta"] = metadata
+                await insert_one(conn, "public.migration", migration_data)
 
     logs.info("Done!")
     return True
