@@ -23,10 +23,11 @@ _GET_LATEST_MIGRATION_QUERY = textwrap.dedent(
     """
 SELECT _m.file_ts, _m.file_name, _m.file_id
 FROM public.migration _m
-       left join public.migration _r
-                 on _r.migration_type = 'down' and _r.file_id = _m.file_id
 where _m.migration_type = 'up'
-and _r.file_id is null
+-- a rollback only cancels the ups applied before it
+and not exists(select 1
+               from public.migration _r
+               where _r.migration_type = 'down' and _r.file_id = _m.file_id and _r.id > _m.id)
 order by _m.applied_at desc, file_ts desc limit 1
 """
 )
@@ -289,9 +290,12 @@ async def get_applied_migrations(conn: asyncpg.Connection) -> list[AppliedMigrat
     try:
         data = await conn.fetch(
             """
-            SELECT _m.file_id, _r.file_id is not null as has_applied_rollback
+            SELECT _m.file_id,
+                   exists(select 1
+                          from public.migration _r
+                          where _r.migration_type = 'down' and _r.file_id = _m.file_id and _r.id > _m.id)
+                       as has_applied_rollback
             FROM public.migration _m
-                     left join public.migration _r on _r.migration_type = 'down' and _r.file_id = _m.file_id
             where _m.migration_type = 'up'
             order by _m.applied_at desc
             """

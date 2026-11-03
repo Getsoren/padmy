@@ -218,6 +218,17 @@ def _insert_migrations(
     insert_many(engine, "migration", _data)
 
 
+def _rolled_back_and_reapplied(engine):
+    _insert_migrations(engine, nb_migrations=2)
+    _now = dt.datetime.now()
+    for offset, file_name in enumerate(("2-00000001-down.sql", "2-00000001-up.sql"), start=1):
+        insert_one(
+            engine,
+            "migration",
+            {"file_name": file_name, "applied_at": _now + dt.timedelta(seconds=offset), **parse_filename(file_name)},
+        )
+
+
 @pytest.mark.parametrize(
     "migration_type, setup_fn, params,expected",
     [
@@ -319,18 +330,31 @@ def _insert_migrations(
             ["00000000", "00000001"],
             id="reapply migrations",
         ),
-        # TODO: fix this case
-        # pytest.param(
-        #     "up",
-        #     lambda engine: (
-        #         _insert_migrations(engine, nb_migrations=2),
-        #         _insert_migrations(engine, nb_migrations=2, migration_type="down", offset_seconds=1),
-        #         _insert_migrations(engine, nb_migrations=1, offset_seconds=2),
-        #     ),
-        #     {"nb_migrations": 1},
-        #     ["00000001"],
-        #     id="reapply migration a second time",
-        # ),
+        pytest.param(
+            "up",
+            lambda engine: (
+                _insert_migrations(engine, nb_migrations=2),
+                _insert_migrations(engine, nb_migrations=2, migration_type="down", offset_seconds=1),
+                _insert_migrations(engine, nb_migrations=1, offset_seconds=2),
+            ),
+            {"nb_migrations": 1},
+            ["00000001"],
+            id="reapply migration a second time",
+        ),
+        pytest.param(
+            "up",
+            _rolled_back_and_reapplied,
+            {"nb_migrations": -1},
+            [],
+            id="up after rollback and reapply",
+        ),
+        pytest.param(
+            "down",
+            _rolled_back_and_reapplied,
+            {"nb_migrations": 1},
+            ["00000001"],
+            id="rollback after rollback and reapply",
+        ),
     ],
 )
 @pytest.mark.usefixtures("clean_migration", "setup")
