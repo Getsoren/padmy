@@ -492,6 +492,66 @@ def test_migrate_up_lock_timeout(engine, aengine, loop, hold_lock, use_transacti
     assert loop.run_until_complete(aengine.fetchval("SHOW lock_timeout")) == "0", "The timeout leaked to the session"
 
 
+_REPORT_HEADER = "-- Prev-file: 1-00000000-up.sql\n-- Author: foo@bar.baz\n"
+
+
+@pytest.mark.parametrize(
+    "header, sql, expected",
+    [
+        pytest.param(
+            "",
+            "ALTER TABLE general.test ADD baz text;",
+            {"locked_tables": ["general.test"], "rewritten_tables": [], "has_unacknowledged_rewrites": False},
+            id="brief lock, no rewrite",
+        ),
+        pytest.param(
+            "",
+            "ALTER TABLE general.test ALTER foo TYPE bigint;",
+            {
+                "locked_tables": ["general.test"],
+                "rewritten_tables": ["general.test"],
+                "has_unacknowledged_rewrites": True,
+            },
+            id="unacknowledged rewrite",
+        ),
+        pytest.param(
+            "-- Rewrites: small table\n",
+            "ALTER TABLE general.test ALTER foo TYPE bigint;",
+            {
+                "locked_tables": ["general.test"],
+                "rewritten_tables": ["general.test"],
+                "has_unacknowledged_rewrites": False,
+            },
+            id="acknowledged rewrite",
+        ),
+        pytest.param(
+            "",
+            "CREATE TABLE general.new_table (id int primary key);",
+            {"locked_tables": [], "rewritten_tables": [], "has_unacknowledged_rewrites": False},
+            id="new table is not reported",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema")
+def test_migrate_report(engine, aengine, loop, tmp_path, header, sql, expected):
+    import shutil
+
+    from padmy.migration import migrate_up, migrate_setup, migrate_report
+
+    for _file in VALID_MIGRATIONS_DIR.glob("1-*"):
+        shutil.copy(_file, tmp_path)
+    (tmp_path / "2-00000002-up.sql").write_text(_REPORT_HEADER + header + sql)
+    (tmp_path / "2-00000002-down.sql").write_text(_REPORT_HEADER)
+    loop.run_until_complete(migrate_setup(aengine))
+    loop.run_until_complete(migrate_up(aengine, folder=tmp_path, nb_migrations=1))
+
+    (report,) = loop.run_until_complete(migrate_report(aengine, tmp_path))
+
+    assert {k: getattr(report, k) for k in expected} == expected
+    assert report.duration >= 0
+    assert len(fetch_all(engine, "SELECT * FROM public.migration")) == 1, "The report must roll back"
+
+
 class TestVerifyMigrations:
     @pytest.fixture(autouse=True)
     def setup_tables(self, setup):

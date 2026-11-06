@@ -199,3 +199,53 @@ async def verify_migrations(
 
     async with pg_infos.get_conn() as conn:
         await verify_migrations(conn, migrations_dir)
+
+
+@migration.command(
+    cmd="lock-report", help="Report the tables each pending migration locks and rewrites, then roll back"
+)
+async def migrate_lock_report_main(
+    db: str = PgDatabase,
+    pg_infos: PGConnectionInfo = Derived(get_pg_infos),
+    sql_dir: Path = MigrationDir,
+    nb_migrations: int = Option(-1, "-n", "--nb-migrations", help="Number of migrations to check (-1 for all)"),
+    lock_timeout: str | None = Option(None, "--lock-timeout", help="Fail if a lock waits longer (e.g. 5s)"),
+    statement_timeout: str | None = Option(None, "--statement-timeout", help="Fail if a statement runs longer"),
+):
+    """
+    Applies the pending migrations in a transaction that is rolled back, and lists for each one its duration,
+    the existing tables it locks in ACCESS EXCLUSIVE mode and the ones it rewrites.
+    Fails if a migration rewrites a table without a `-- Rewrites: <reason>` header.
+    """
+    from rich.table import Table
+
+    from .migration import migrate_report
+
+    async with pg_infos.get_conn(db) as conn:
+        reports = await migrate_report(
+            conn,
+            sql_dir,
+            nb_migrations=nb_migrations,
+            lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
+        )
+    if not reports:
+        CONSOLE.print("No pending migrations")
+        return
+
+    table = Table(title="Migration locks")
+    for column in ("Migration", "Duration", "Locked (ACCESS EXCLUSIVE)", "Rewritten", "Rewrites reason"):
+        table.add_column(column)
+    for report in reports:
+        table.add_row(
+            report.file_name,
+            f"{report.duration:.3f}s",
+            ", ".join(report.locked_tables),
+            f"[red]{', '.join(report.rewritten_tables)}[/red]",
+            report.rewrites_reason or "",
+        )
+    CONSOLE.print(table)
+
+    unacknowledged = [r.file_name for r in reports if r.has_unacknowledged_rewrites]
+    if unacknowledged:
+        raise CommandError(f"Rewrites without a '-- Rewrites: <reason>' header: {', '.join(unacknowledged)}")
