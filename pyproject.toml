@@ -2,7 +2,7 @@
 name = "padmy"
 version = "0.32.0"
 authors = [
-    { email = "julien.brayere@soren.fr" }
+    { email = "julien@getsoren.ai" }
 ]
 readme = "README.md"
 
