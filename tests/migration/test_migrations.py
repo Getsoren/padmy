@@ -16,6 +16,7 @@ from .conftest import (
     INVALID_MIGRATIONS_DIR,
     INVALID_MIGRATIONS_DIR_MULTIPLE,
     VALID_MIGRATIONS_SKIP_DIR,
+    VALID_MIGRATIONS_NO_TRANSACTION_DIR,
 )
 from ..conftest import PG_DATABASE
 from ..utils import check_table_exists, check_column_exists
@@ -542,6 +543,15 @@ _REPORT_HEADER = "-- Prev-file: 1-00000000-up.sql\n-- Author: foo@bar.baz\n"
             id="foreign key blocks writes on both tables",
         ),
         pytest.param(
+            "-- No-transaction: true\n",
+            "CREATE INDEX CONCURRENTLY test_foo_idx ON general.test (foo);",
+            {
+                "skipped": "runs outside a transaction: it and the migrations after it were not checked",
+                "write_locks": {},
+            },
+            id="report stops at a no-transaction migration",
+        ),
+        pytest.param(
             "",
             "CREATE TABLE general.new_table (id int primary key);",
             {"locked_tables": [], "rewritten_tables": [], "has_unacknowledged_rewrites": False},
@@ -701,3 +711,56 @@ class TestMigrationFiles:
             assert verify_migration_files(migration_dir, raise_error=True) == e
 
         assert capsys.readouterr().out.strip()
+
+
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema", "setup")
+def test_migrate_up_down_no_transaction(engine, aengine, loop):
+    from padmy.migration import migrate_up, migrate_down
+
+    def _has_index():
+        return bool(fetch_all(engine, "SELECT 1 FROM pg_indexes WHERE indexname = 'test_foo_idx'"))
+
+    loop.run_until_complete(migrate_up(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert _has_index()
+    assert check_column_exists(engine, "general", "test", "baz")
+
+    loop.run_until_complete(migrate_down(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR))
+    assert not _has_index()
+    assert not check_table_exists(engine, "general", "test")
+    migrations = fetch_all(engine, "SELECT migration_type FROM public.migration")
+    assert [m["migration_type"] for m in migrations] == ["up"] * 3 + ["down"] * 3
+
+
+@pytest.mark.parametrize(
+    "hold_lock, outer_transaction, expected",
+    [
+        pytest.param(False, False, nullcontext(), id="applied"),
+        pytest.param(True, False, pytest.raises(asyncpg.LockNotAvailableError), id="lock wait times out"),
+        pytest.param(
+            False, True, pytest.raises(ValueError, match="inside an open transaction"), id="outer transaction"
+        ),
+    ],
+)
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema", "setup")
+def test_migrate_up_no_transaction_guards(engine, aengine, loop, hold_lock, outer_transaction, expected):
+    from padmy.migration import migrate_up
+
+    loop.run_until_complete(migrate_up(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR, nb_migrations=1))
+    if hold_lock:
+        engine.execute("LOCK TABLE general.test IN SHARE UPDATE EXCLUSIVE MODE")
+
+    async def _migrate():
+        async with aengine.transaction() if outer_transaction else nullcontext():
+            await migrate_up(aengine, folder=VALID_MIGRATIONS_NO_TRANSACTION_DIR, nb_migrations=1, lock_timeout="100ms")
+
+    try:
+        with expected:
+            loop.run_until_complete(_migrate())
+    finally:
+        engine.rollback()
+
+    has_index = bool(
+        fetch_all(engine, "SELECT 1 FROM pg_indexes WHERE indexname = 'test_foo_idx' AND schemaname = 'general'")
+    )
+    assert has_index is isinstance(expected, nullcontext)
+    assert loop.run_until_complete(aengine.fetchval("SHOW lock_timeout")) == "0", "The timeout leaked to the session"
