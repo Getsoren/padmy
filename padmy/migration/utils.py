@@ -36,6 +36,7 @@ PREFIXES = {
     "prev-file": "-- Prev-file:",
     "version": "-- Version:",
     "skip-verify": "-- Skip-verify:",
+    "rewrites": "-- Rewrites:",
 }
 
 
@@ -50,6 +51,8 @@ class Header:
     version: str | None
     skip_verify: bool = False
     skip_reason: str | None = None
+    rewrites_reason: str | None = None
+    """Why the migration may rewrite existing tables (`-- Rewrites: <reason>`)."""
 
     def __post_init__(self):
         if self.skip_verify and self.skip_reason is None:
@@ -57,7 +60,7 @@ class Header:
 
     @property
     def is_empty(self):
-        return not any([self.prev_file, self.author, self.version])
+        return not any([self.prev_file, self.author, self.version, self.rewrites_reason])
 
     @classmethod
     def from_text(cls, text: str):
@@ -66,6 +69,7 @@ class Header:
         version = None
         skip_verify = False
         skip_reason = None
+        rewrites_reason = None
         for line in text.split("\n"):
             if line.startswith(PREFIXES["prev-file"]):
                 prev_file = line.split(":")[1].strip()
@@ -76,7 +80,16 @@ class Header:
             elif line.startswith(PREFIXES["skip-verify"]):
                 skip_reason = line.split(":")[1].strip().lower()
                 skip_verify = True
-        return cls(prev_file, author, version, skip_verify=skip_verify, skip_reason=skip_reason)
+            elif line.startswith(PREFIXES["rewrites"]):
+                rewrites_reason = line.split(":", 1)[1].strip() or "no reason provided"
+        return cls(
+            prev_file,
+            author,
+            version,
+            skip_verify=skip_verify,
+            skip_reason=skip_reason,
+            rewrites_reason=rewrites_reason,
+        )
 
     def as_text(self):
         _header = [
@@ -87,6 +100,8 @@ class Header:
             _header.append(f"{PREFIXES['version']} {self.version}")
         if self.skip_verify:
             _header.append(f"{PREFIXES['skip-verify']} {self.skip_reason or 'no reason provided'}")
+        if self.rewrites_reason is not None:
+            _header.append(f"{PREFIXES['rewrites']} {self.rewrites_reason}")
 
         file_header = textwrap.dedent("\n".join(_header)).strip()
         return file_header
@@ -107,6 +122,10 @@ class MigrationFile:
     @property
     def skip_verify(self) -> bool:
         return self.header.skip_verify if self.header else False
+
+    @property
+    def rewrites_reason(self) -> str | None:
+        return self.header.rewrites_reason if self.header else None
 
     def replace_ts(self, ts: dt.datetime):
         self.ts = ts

@@ -216,6 +216,7 @@ This will create 2 new files:
 > - a reference to the previous file (if any): `-- Prev-file: {timestamp}-{migration_id}`
 > - the name of the author who created the migration: `-- Author: {author}`
 > - (optionally) should the down migration be ignored: `-- Skip-verify: {reason}`
+> - (optionally) why the migration may rewrite existing tables: `-- Rewrites: {reason}`
 
 
 Let's now modify the `up.sql` file with:
@@ -281,6 +282,22 @@ They apply to the migration's transaction only, and a migration's own `SET LOCAL
 
 ```bash
 uvx padmy -vv migrate up --sql-dir /tmp/migrations --lock-timeout 5s --statement-timeout 5min
+```
+
+**Optional**: To see what pending migrations lock, run them in a transaction that is rolled back:
+
+```bash
+uvx padmy -vv migrate lock-report --sql-dir /tmp/migrations --lock-timeout 5s
+```
+
+For each migration, it lists its duration, the existing tables it locks in `ACCESS EXCLUSIVE` mode until commit,
+and the tables it rewrites (their data file changed, as with a column type change), which stay blocked for as long
+as the rewrite takes. Postgres takes the same locks and rewrites on an empty database, so this works in CI; run it on
+a copy of production to get realistic durations. The command fails when a migration rewrites a table without
+acknowledging it in its header:
+
+```sql
+-- Rewrites: booking_items is small, run outside peak hours
 ```
 
 ## 5. Comparing databases schemas

@@ -4,6 +4,7 @@ import difflib
 import filecmp
 import functools
 import textwrap
+import time
 import typing
 from contextlib import nullcontext
 from pathlib import Path
@@ -237,13 +238,81 @@ async def get_migration_files(
     return migrations_to_apply
 
 
-async def apply_migration(conn: asyncpg.Connection, migration: MigrationFile, metadata: dict | None = None):
+_TABLES_QUERY = """
+SELECT c.oid, c.relfilenode, format('%I.%I', n.nspname, c.relname) AS name
+FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'm')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname !~ '^pg_toast'
+"""
+
+_EXCLUSIVE_LOCKS_QUERY = """
+SELECT relation
+FROM pg_locks
+WHERE pid = pg_backend_pid()
+  AND locktype = 'relation'
+  AND mode = 'AccessExclusiveLock'
+  AND granted
+"""
+
+
+@dataclasses.dataclass
+class MigrationReport:
+    """What applying one migration did to the tables that existed before it."""
+
+    file_name: str
+    duration: float
+    locked_tables: list[str]
+    """Tables it holds an ACCESS EXCLUSIVE lock on until commit (only seen inside a transaction)."""
+    rewritten_tables: list[str]
+    """Tables whose data file changed: a full rewrite (or a TRUNCATE), blocking for as long as the table is large."""
+    rewrites_reason: str | None
+
+    @property
+    def has_unacknowledged_rewrites(self) -> bool:
+        return bool(self.rewritten_tables) and self.rewrites_reason is None
+
+
+async def _get_tables(conn: Connection) -> dict[int, tuple[int, str]]:
+    return {row["oid"]: (row["relfilenode"], row["name"]) for row in await conn.fetch(_TABLES_QUERY)}
+
+
+async def _get_exclusive_locks(conn: Connection) -> set[int]:
+    return {row["relation"] for row in await conn.fetch(_EXCLUSIVE_LOCKS_QUERY)}
+
+
+async def apply_migration(
+    conn: asyncpg.Connection, migration: MigrationFile, metadata: dict | None = None
+) -> MigrationReport:
     logs.info(f"Running {migration.path.name} (ts: {migration.ts})...")
+    tables_before = await _get_tables(conn)
+    locks_before = await _get_exclusive_locks(conn)
+    start = time.perf_counter()
     try:
         await exec_file(conn, migration.path)
     except Exception as e:
         logs.error(f'Failed to execute migration_id "{migration.file_id}" ({e})')
         raise e
+    duration = time.perf_counter() - start
+    tables_after = await _get_tables(conn)
+    new_locks = await _get_exclusive_locks(conn) - locks_before
+
+    report = MigrationReport(
+        file_name=migration.path.name,
+        duration=duration,
+        locked_tables=sorted(name for oid, (_, name) in tables_before.items() if oid in new_locks),
+        rewritten_tables=sorted(
+            name
+            for oid, (filenode, name) in tables_before.items()
+            if oid in tables_after and tables_after[oid][0] != filenode
+        ),
+        rewrites_reason=migration.rewrites_reason,
+    )
+    logs.info(f"Applied {migration.path.name} in {duration:.3f}s")
+    if report.rewritten_tables:
+        logs.warning(f"{migration.path.name} rewrote {', '.join(report.rewritten_tables)}")
+
     migration_data = {
         "file_ts": migration.ts,
         "file_id": migration.file_id,
@@ -253,6 +322,7 @@ async def apply_migration(conn: asyncpg.Connection, migration: MigrationFile, me
     if metadata:
         migration_data["meta"] = metadata
     await insert_one(conn, "public.migration", migration_data)
+    return report
 
 
 async def _set_timeouts(conn: Connection, *, lock_timeout: str | None, statement_timeout: str | None):
@@ -295,6 +365,25 @@ async def migrate_up(
             await apply_migration(conn, _migration, metadata)
     logs.info("Done!")
     return True
+
+
+async def migrate_report(
+    conn: Connection,
+    folder: Path,
+    *,
+    nb_migrations: int = -1,
+    lock_timeout: str | None = None,
+    statement_timeout: str | None = None,
+) -> list[MigrationReport]:
+    """Apply the pending migrations in one transaction, report what each one locked and rewrote, then roll back."""
+    migration_files = await get_migration_files(conn, folder, nb_migrations=nb_migrations)
+    transaction = conn.transaction()
+    await transaction.start()
+    try:
+        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
+        return [await apply_migration(conn, _migration) for _migration in migration_files]
+    finally:
+        await transaction.rollback()
 
 
 class AppliedMigration(typing.TypedDict):
