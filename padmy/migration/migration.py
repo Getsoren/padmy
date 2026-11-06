@@ -247,12 +247,15 @@ WHERE c.relkind IN ('r', 'm')
   AND n.nspname !~ '^pg_toast'
 """
 
-_EXCLUSIVE_LOCKS_QUERY = """
-SELECT relation
+# Lock modes that block writes on the table, weakest first
+WRITE_BLOCKING_LOCK_MODES = ("ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock")
+
+_WRITE_BLOCKING_LOCKS_QUERY = """
+SELECT relation, mode
 FROM pg_locks
 WHERE pid = pg_backend_pid()
   AND locktype = 'relation'
-  AND mode = 'AccessExclusiveLock'
+  AND mode = ANY ($1::text[])
   AND granted
 """
 
@@ -268,6 +271,8 @@ class MigrationReport:
     rewritten_tables: list[str]
     """Tables whose data file changed: a full rewrite (or a TRUNCATE), blocking for as long as the table is large."""
     rewrites_reason: str | None
+    write_locks: dict[str, str] = dataclasses.field(default_factory=dict)
+    """Table -> strongest new lock blocking writes until commit (e.g. ShareLock for a plain CREATE INDEX)."""
 
     @property
     def has_unacknowledged_rewrites(self) -> bool:
@@ -278,8 +283,19 @@ async def _get_tables(conn: Connection) -> dict[int, tuple[int, str]]:
     return {row["oid"]: (row["relfilenode"], row["name"]) for row in await conn.fetch(_TABLES_QUERY)}
 
 
-async def _get_exclusive_locks(conn: Connection) -> set[int]:
-    return {row["relation"] for row in await conn.fetch(_EXCLUSIVE_LOCKS_QUERY)}
+async def _get_write_locks(conn: Connection) -> set[tuple[int, str]]:
+    rows = await conn.fetch(_WRITE_BLOCKING_LOCKS_QUERY, list(WRITE_BLOCKING_LOCK_MODES))
+    return {(row["relation"], row["mode"]) for row in rows}
+
+
+def _strongest_new_locks(before: set[tuple[int, str]], after: set[tuple[int, str]]) -> dict[int, str]:
+    strongest: dict[int, str] = {}
+    for oid, mode in after - before:
+        if oid not in strongest or WRITE_BLOCKING_LOCK_MODES.index(mode) > WRITE_BLOCKING_LOCK_MODES.index(
+            strongest[oid]
+        ):
+            strongest[oid] = mode
+    return strongest
 
 
 async def apply_migration(
@@ -287,7 +303,7 @@ async def apply_migration(
 ) -> MigrationReport:
     logs.info(f"Running {migration.path.name} (ts: {migration.ts})...")
     tables_before = await _get_tables(conn)
-    locks_before = await _get_exclusive_locks(conn)
+    locks_before = await _get_write_locks(conn)
     start = time.perf_counter()
     try:
         await exec_file(conn, migration.path)
@@ -296,18 +312,25 @@ async def apply_migration(
         raise e
     duration = time.perf_counter() - start
     tables_after = await _get_tables(conn)
-    new_locks = await _get_exclusive_locks(conn) - locks_before
+    new_locks = _strongest_new_locks(locks_before, await _get_write_locks(conn))
 
     report = MigrationReport(
         file_name=migration.path.name,
         duration=duration,
-        locked_tables=sorted(name for oid, (_, name) in tables_before.items() if oid in new_locks),
+        locked_tables=sorted(
+            name for oid, (_, name) in tables_before.items() if new_locks.get(oid) == "AccessExclusiveLock"
+        ),
         rewritten_tables=sorted(
             name
             for oid, (filenode, name) in tables_before.items()
             if oid in tables_after and tables_after[oid][0] != filenode
         ),
         rewrites_reason=migration.rewrites_reason,
+        write_locks={
+            name: new_locks[oid]
+            for oid, (_, name) in sorted(tables_before.items(), key=lambda x: x[1][1])
+            if oid in new_locks
+        },
     )
     logs.info(f"Applied {migration.path.name} in {duration:.3f}s")
     if report.rewritten_tables:
