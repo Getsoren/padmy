@@ -255,6 +255,18 @@ async def apply_migration(conn: asyncpg.Connection, migration: MigrationFile, me
     await insert_one(conn, "public.migration", migration_data)
 
 
+async def _set_timeouts(conn: Connection, *, lock_timeout: str | None, statement_timeout: str | None):
+    """Scope the timeouts (Postgres durations, e.g. `5s`) to the current transaction."""
+    timeouts = {"lock_timeout": lock_timeout, "statement_timeout": statement_timeout}
+    if not any(timeouts.values()):
+        return
+    if not conn.is_in_transaction():
+        raise ValueError("Migration timeouts need a transaction (use_transaction=True or an outer one)")
+    for name, value in timeouts.items():
+        if value is not None:
+            await conn.execute("SELECT set_config($1, $2, true)", name, value)
+
+
 async def migrate_up(
     conn: Connection,
     folder: Path,
@@ -262,9 +274,12 @@ async def migrate_up(
     nb_migrations: int = -1,
     metadata: dict | None = None,
     use_transaction: bool = True,
+    lock_timeout: str | None = None,
+    statement_timeout: str | None = None,
 ) -> bool:
     """Migrate from the latest migration applied available in the database
     to the latest one in the `folder` dir.
+    `lock_timeout` and `statement_timeout` apply to the whole transaction; a migration's own `SET LOCAL` wins.
     """
     migration_files = await get_migration_files(conn, folder, nb_migrations=nb_migrations)
 
@@ -275,6 +290,7 @@ async def migrate_up(
     _transaction = conn.transaction if use_transaction else nullcontext
     logs.info(f"Found {len(migration_files)} migrations to apply")
     async with _transaction():
+        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
         for _migration in migration_files:
             await apply_migration(conn, _migration, metadata)
     logs.info("Done!")
@@ -352,9 +368,12 @@ async def migrate_down(
     metadata: dict | None = None,
     use_transaction: bool = True,
     migration_id: str | None = None,
+    lock_timeout: str | None = None,
+    statement_timeout: str | None = None,
 ) -> bool:
     """
-    Rollback `nb_migrations` back (default -1 for all available) or until migration_id (if set)
+    Rollback `nb_migrations` back (default -1 for all available) or until migration_id (if set).
+    The timeouts behave as in `migrate_up`.
     """
     rollback_files = await get_rollback_files(
         conn, folder, migration_id=migration_id, nb_migrations=nb_migrations or -1
@@ -367,6 +386,7 @@ async def migrate_down(
     _transaction = conn.transaction if use_transaction else nullcontext
     logs.info(f"Found {nb_files} rollback files to apply")
     async with _transaction():
+        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
         for _rollback in rollback_files:
             logs.info(f"Running {_rollback.path.name}...")
             try:
