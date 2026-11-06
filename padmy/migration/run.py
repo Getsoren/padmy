@@ -70,40 +70,59 @@ def new_migrate_file(
 
 @migration.command(cmd="up", help="Migrate database to the new schema")
 async def migrate_up_main(
+    db: str = PgDatabase,
     pg_infos: PGConnectionInfo = Derived(get_pg_infos),
     sql_dir: Path = MigrationDir,
     nb_migrations: int = Option(1, "-n", "--nb-migrations", help="Number of migrations to apply"),
+    lock_timeout: str | None = Option(None, "--lock-timeout", help="Fail if a lock waits longer (e.g. 5s)"),
+    statement_timeout: str | None = Option(None, "--statement-timeout", help="Fail if a statement runs longer"),
 ):
     from .migration import migrate_up, NoSetupTableError
 
-    async with pg_infos.get_conn() as conn:
+    async with pg_infos.get_conn(db) as conn:
         try:
-            await migrate_up(conn, folder=sql_dir, nb_migrations=nb_migrations)
+            await migrate_up(
+                conn,
+                folder=sql_dir,
+                nb_migrations=nb_migrations,
+                lock_timeout=lock_timeout,
+                statement_timeout=statement_timeout,
+            )
         except NoSetupTableError as e:
             logs.critical(e, exc_info=False)
 
 
 @migration.command(cmd="down", help="Rollback the database to the specified migration")
 async def migrate_down_main(
+    db: str = PgDatabase,
     pg_infos: PGConnectionInfo = Derived(get_pg_infos),
     sql_dir: Path = MigrationDir,
     nb_rollbacks: int | None = Option(None, "-n", "--nb-rollbacks", help="Number of rollbacks to apply"),
     migration_id: str | None = Option(None, "-m", "--migration-id", help="Migration id to rollback to"),
+    lock_timeout: str | None = Option(None, "--lock-timeout", help="Fail if a lock waits longer (e.g. 5s)"),
+    statement_timeout: str | None = Option(None, "--statement-timeout", help="Fail if a statement runs longer"),
 ):
     from .migration import migrate_down, NoSetupTableError
 
-    async with pg_infos.get_conn() as conn:
+    async with pg_infos.get_conn(db) as conn:
         try:
-            await migrate_down(conn, folder=sql_dir, migration_id=migration_id, nb_migrations=nb_rollbacks)
+            await migrate_down(
+                conn,
+                folder=sql_dir,
+                migration_id=migration_id,
+                nb_migrations=nb_rollbacks,
+                lock_timeout=lock_timeout,
+                statement_timeout=statement_timeout,
+            )
         except NoSetupTableError as e:
             logs.critical(e, exc_info=False)
 
 
 @migration.command(cmd="setup", help="Create the tables that will contain the migration metadata")
-async def migrate_setup_main(pg_infos: PGConnectionInfo = Derived(get_pg_infos)):
+async def migrate_setup_main(db: str = PgDatabase, pg_infos: PGConnectionInfo = Derived(get_pg_infos)):
     from .migration import migrate_setup
 
-    async with pg_infos.get_conn() as conn:
+    async with pg_infos.get_conn(db) as conn:
         await migrate_setup(conn)
 
 

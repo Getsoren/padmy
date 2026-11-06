@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from typing import Literal
 from unittest.mock import Mock
 
+import asyncpg
 import psycopg
 import pytest
 from tracktolib.pg_sync import fetch_all, insert_one, insert_many
@@ -460,6 +461,35 @@ def test_migrate_up_down(engine, caplog, aengine, loop):
     assert check_column_exists(engine, "general", "test", "baz")
     data = fetch_all(engine, "SELECT * FROM public.migration ORDER BY applied_at DESC")
     assert len(data) == 6
+
+
+@pytest.mark.parametrize(
+    "hold_lock, use_transaction, expected",
+    [
+        pytest.param(False, True, nullcontext(), id="applied"),
+        pytest.param(True, True, pytest.raises(asyncpg.LockNotAvailableError), id="lock wait times out"),
+        pytest.param(False, False, pytest.raises(ValueError, match="need a transaction"), id="no transaction"),
+    ],
+)
+@pytest.mark.usefixtures("clean_migration", "setup_test_schema")
+def test_migrate_up_lock_timeout(engine, aengine, loop, hold_lock, use_transaction, expected):
+    from padmy.migration import migrate_up, migrate_setup
+
+    loop.run_until_complete(migrate_setup(aengine))
+    loop.run_until_complete(migrate_up(aengine, folder=VALID_MIGRATIONS_DIR, nb_migrations=1))
+    if hold_lock:
+        engine.execute("LOCK TABLE general.test IN ACCESS SHARE MODE")
+    try:
+        with expected:
+            loop.run_until_complete(
+                migrate_up(aengine, folder=VALID_MIGRATIONS_DIR, lock_timeout="100ms", use_transaction=use_transaction)
+            )
+    finally:
+        engine.rollback()
+
+    applied = isinstance(expected, nullcontext)
+    assert check_column_exists(engine, "general", "test", "baz") is applied
+    assert loop.run_until_complete(aengine.fetchval("SHOW lock_timeout")) == "0", "The timeout leaked to the session"
 
 
 class TestVerifyMigrations:

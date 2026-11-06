@@ -276,6 +276,13 @@ We are all good !
 uvx padmy -vv migrate verify-files --sql-dir /tmp/migrations --no-raise
 ```
 
+**Optional**: To fail fast instead of queueing behind long-running queries, pass timeouts to `up` or `down`.
+They apply to the migration's transaction only, and a migration's own `SET LOCAL` overrides them:
+
+```bash
+uvx padmy -vv migrate up --sql-dir /tmp/migrations --lock-timeout 5s --statement-timeout 5min
+```
+
 ## 5. Comparing databases schemas
 
 You can compare two databases by running:
