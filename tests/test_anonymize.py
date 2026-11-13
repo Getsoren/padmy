@@ -1,4 +1,5 @@
 import textwrap
+from typing import LiteralString
 
 import pytest
 from tracktolib.pg_sync import fetch_all, insert_many
@@ -39,12 +40,28 @@ from padmy.config import AnoFields
     """,
             id="Multiple PKs + constant",
         ),
+        pytest.param(
+            "public.test",
+            ["id1"],
+            ["data__name", "data__code"],
+            {"id1": "text", "data__name": "text", "data__code": "text"},
+            None,
+            """
+    UPDATE public.test AS u
+    SET
+      data = jsonb_set(jsonb_set(u.data, '{name}', coalesce(to_jsonb(u2.data__name), 'null'), false), '{code}', coalesce(to_jsonb(u2.data__code), 'null'), false)
+    FROM unnest($1::TEXT[], $2::TEXT[], $3::TEXT[]) AS u2(id1, data__name, data__code)
+    WHERE u2.id1 = u.id1
+    """,
+            id="Two keys of one jsonb column",
+        ),
     ],
 )
 def test_get_update_query(table, pks, fields, field_types, constants, expected):
     from padmy.anonymize.anonymize import get_update_query
 
-    query = get_update_query(table, pks, fields, field_types, constants=constants)
+    json_paths = {f: tuple(f.split("__")) for f in fields if "__" in f}
+    query = get_update_query(table, pks, fields, field_types, constants=constants, json_paths=json_paths)
     assert textwrap.dedent(query).strip().lower() == textwrap.dedent(expected).strip().lower()
 
 
@@ -89,11 +106,14 @@ def setup_ano_types_table(engine):
         (
             id    SERIAL PRIMARY KEY,
             addr  public.ano_address,
-            phone VARCHAR(15)
+            phone VARCHAR(15),
+            data  JSONB,
+            phone_len INT GENERATED ALWAYS AS (length(phone)) STORED
         );
         """
     )
     insert_many(engine, "public.ano_types", [{"id": i, "phone": "0611223344"} for i in range(5)])
+    engine.execute("""UPDATE public.ano_types SET data = '{"name": "Doe John", "keep": "x"}'""")
     engine.execute("UPDATE public.ano_types SET addr = ('street', 'zip')::public.ano_address")
     engine.commit()
     yield
@@ -169,6 +189,8 @@ def test_get_fake_value(faker, field_type, extra, predicate):
             {0},
             id="faker, where filter",
         ),
+        pytest.param([AnoFields(column="data", type="NAME", path="name")], "id <> 0", {0}, id="json key, where filter"),
+        pytest.param([AnoFields(column="data", type="NULL", path="name")], "id <> 0", {0}, id="json key to null"),
     ],
 )
 @pytest.mark.usefixtures("setup_ano_types_table")
@@ -180,14 +202,40 @@ def test_anonymize_table_where(aengine, loop, engine, faker, fields, where, unto
     table = ConfigTable("public", "ano_types", fields=fields, where=where)
     loop.run_until_complete(anonymize_table(aengine, table, ["id"], faker))
 
-    column = fields[0].column
-    db = fetch_all(
-        engine,
-        "SELECT id FROM public.ano_types WHERE addr::text = '(street,zip)'"
-        if column == "addr"
-        else "SELECT id FROM public.ano_types WHERE phone = '0611223344'",
-    )
+    untouched_queries: dict[str, LiteralString] = {
+        "addr": "SELECT id FROM public.ano_types WHERE addr::text = '(street,zip)'",
+        "phone": "SELECT id FROM public.ano_types WHERE phone = '0611223344'",
+        "data": "SELECT id FROM public.ano_types WHERE data ->> 'name' = 'Doe John'",
+    }
+    db = fetch_all(engine, untouched_queries[fields[0].column])
     assert {x["id"] for x in db} == untouched_ids
+    keys = fetch_all(engine, "SELECT DISTINCT data ->> 'keep' AS keep, data ? 'name' AS has_name FROM public.ano_types")
+    assert keys == [{"keep": "x", "has_name": True}], "a json key rewrite keeps the other keys and the key itself"
+
+
+@pytest.mark.parametrize(
+    "keep, kept_ids",
+    [
+        pytest.param("id < 2", {0, 1}, id="filter"),
+        pytest.param("false", set(), id="empty the table"),
+        pytest.param(
+            "id IN (SELECT id FROM (SELECT id, row_number() OVER (ORDER BY id DESC) rn FROM public.ano_types) s WHERE rn <= 2)",
+            {3, 4},
+            id="latest n rows",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("setup_ano_types_table")
+def test_anonymize_db_keep(apool, engine, loop, faker, keep, kept_ids):
+    """`keep` runs before anonymizing, even on a table without fields, and generated columns come back."""
+    from padmy.anonymize import anonymize_db
+    from padmy.config import Config, ConfigTable
+
+    loop.run_until_complete(anonymize_db(apool, Config(tables=[ConfigTable("public", "ano_types", keep=keep)]), faker))
+
+    db = fetch_all(engine, "SELECT id, phone_len FROM public.ano_types")
+    assert {x["id"] for x in db} == kept_ids
+    assert all(x["phone_len"] == 10 for x in db), "generated columns are recomputed on the rows put back"
 
 
 def test_gen_mock_data_unique(faker):

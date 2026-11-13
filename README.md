@@ -123,6 +123,10 @@ to Faker generators (or `NULL` to blank the column). Available types:
 `NULL` fields are applied in a single set-based `UPDATE`; Faker fields are generated in
 Python and pushed in chunked `UPDATE ... FROM unnest(...)` statements. A table can carry a
 `where:` SQL filter so the rows it excludes are left untouched (eg. internal accounts).
+A field's `path:` fakes one top-level key of a `jsonb` column instead of the whole column
+(rows without that key keep it absent). A table's `keep:` SQL filter deletes every other row
+before anonymizing (`"false"` empties the table): the kept rows are copied aside, the table
+truncated and the rows copied back, so it fails if a foreign key references the table.
 
 Example config:
 
@@ -143,6 +147,16 @@ tables:
         type: DATE_OF_BIRTH
         minimum_age: 18
         maximum_age: 80
+  - schema: public
+    table: contacts
+    where: "kind = 'person'"
+    fields:
+      - column: data                # jsonb
+        path: name                  # only data->'name' is faked
+        type: NAME
+  - schema: public
+    table: audit_log
+    keep: "created_at > now() - interval '30 days'"   # every other row is deleted
 ```
 
 Run with:

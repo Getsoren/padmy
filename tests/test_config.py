@@ -196,3 +196,21 @@ def test_has_ano_fields_true_when_fields_present():
 
     t = ConfigTable(schema="public", table="t", fields=[AnoFields(column="email", type="EMAIL")])
     assert t.has_ano_fields is True
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        pytest.param(
+            {"column": "data", "type": "NAME", "path": "name"},
+            AnoFields(column="data", type="NAME", path="name"),
+            id="json key",
+        ),
+        pytest.param({"column": "data", "type": "NAME", "path": "a'b"}, None, id="json key not a plain key"),
+    ],
+)
+def test_ano_fields_load_path(data, expected):
+    from contextlib import nullcontext
+
+    with nullcontext() if expected else pytest.raises(ValueError, match="plain JSON key"):
+        assert AnoFields.load(data) == expected
