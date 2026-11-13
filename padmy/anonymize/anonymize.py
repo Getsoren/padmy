@@ -30,10 +30,18 @@ def get_update_query(
     field_types: dict,
     *,
     constants: dict[str, str] | None = None,
+    json_paths: dict[str, tuple[str, str]] | None = None,
 ) -> str:
-    """One UPDATE per chunk: generated columns come in as unnest'ed arrays, constants inline in SET."""
+    """One UPDATE per chunk: generated values as unnest'ed arrays, `json_paths` keys via jsonb_set, constants inline."""
+    _json_paths = json_paths or {}
     _table_keys = pks + fields
-    _set = [f"{_field} = u2.{_field}" for _field in fields] + [f"{k} = {v}" for k, v in (constants or {}).items()]
+    _set = [f"{_field} = u2.{_field}" for _field in fields if _field not in _json_paths]
+    _json_exprs: dict[str, str] = {}
+    for _slot, (_column, _path) in _json_paths.items():
+        _expr = _json_exprs.get(_column, f"u.{_column}")
+        _json_exprs[_column] = f"jsonb_set({_expr}, '{{{_path}}}', coalesce(to_jsonb(u2.{_slot}), 'null'), false)"
+    _set += [f"{_column} = {_expr}" for _column, _expr in _json_exprs.items()]
+    _set += [f"{k} = {v}" for k, v in (constants or {}).items()]
     _arrays = ", ".join(f"${i + 1}::{field_types[k]}[]" for i, k in enumerate(_table_keys))
     _where = " AND ".join(f"u2.{_pk} = u.{_pk}" for _pk in pks)
     return f"""
@@ -78,9 +86,13 @@ def _get_fake_value(faker: Faker | UniqueProxy, field: FieldType, extra_fields: 
             raise ValueError(f"Got unimplemented field type {field!r}")
 
 
+def _as_text(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
 def gen_mock_data(faker: Faker, fields: list[AnoFields], size: int) -> Iterator[dict]:
     for _ in range(size):
-        yield {v.column: _get_fake_value(faker.unique if v.unique else faker, v.type, v.extra_args) for v in fields}
+        yield {v.slot: _get_fake_value(faker.unique if v.unique else faker, v.type, v.extra_args) for v in fields}
 
 
 async def anonymize_table(
@@ -94,8 +106,10 @@ async def anonymize_table(
     if table.fields is None:
         raise ValueError("Fields must not be empty")
 
-    constants = {x.column: CONSTANT_TYPES[x.type] for x in table.fields if x.type in CONSTANT_TYPES}
-    generated = [x for x in table.fields if x.type not in CONSTANT_TYPES]
+    # A JSON key is always generated: a constant would need its own jsonb_set
+    constant_fields = [x for x in table.fields if x.type in CONSTANT_TYPES and x.path is None]
+    constants = {x.column: CONSTANT_TYPES[x.type] for x in constant_fields}
+    generated = [x for x in table.fields if x not in constant_fields]
 
     if not generated:
         await conn.execute(get_constant_query(table.full_name, constants, table.where))
@@ -103,11 +117,13 @@ async def anonymize_table(
     if not pks:
         raise ValueError(f"No PKs found for {table.full_name!r}")
 
-    fields = [x.column for x in generated]
-    columns_type = await load_columns_type(conn, table.schema, table.table, pks + fields)
-    sql_types = {_column: _type.sql_type for _column, _type in columns_type.items()}
+    fields = [x.slot for x in generated]
+    json_paths = {x.slot: (x.column, x.path) for x in generated if x.path is not None}
+    columns = pks + [x.column for x in generated if x.path is None]
+    columns_type = await load_columns_type(conn, table.schema, table.table, columns)
+    sql_types = {_column: _type.sql_type for _column, _type in columns_type.items()} | dict.fromkeys(json_paths, "text")
     max_lengths = {_column: _type.max_length for _column, _type in columns_type.items() if _type.max_length is not None}
-    update_query = get_update_query(table.full_name, pks, fields, sql_types, constants=constants)
+    update_query = get_update_query(table.full_name, pks, fields, sql_types, constants=constants, json_paths=json_paths)
     select_query = f"SELECT {', '.join(pks)} FROM {table.full_name}" + (f" WHERE {table.where}" if table.where else "")
 
     _warned: set[str] = set()
@@ -128,16 +144,54 @@ async def anonymize_table(
             async for chunk in chunks:
                 mock_data = list(gen_mock_data(faker, fields=generated, size=len(chunk)))
                 arrays = [[row[pk] for row in chunk] for pk in pks] + [
-                    [_fit(f, mock[f]) for mock in mock_data] for f in fields
+                    [_fit(f, _as_text(mock[f]) if f in json_paths else mock[f]) for mock in mock_data] for f in fields
                 ]
                 await conn.execute(update_query, *arrays)
 
 
-async def anonymize_db(pool: asyncpg.Pool, config: Config, faker: Faker):
-    _tables_to_anonymize = [_table for _table in config.tables if _table.has_ano_fields]
+# Columns an INSERT can write (generated ones are recomputed)
+_INSERTABLE_COLUMNS_QUERY = """
+SELECT attname FROM pg_attribute
+WHERE attrelid = format('%I.%I', $1::text, $2::text)::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''
+ORDER BY attnum
+"""
 
-    if not _tables_to_anonymize:
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+async def keep_rows(conn: asyncpg.Connection, table: ConfigTable):
+    """Keeps only the rows matching `table.keep`: copied aside, TRUNCATE, copied back (no DELETE on a big table)."""
+    if table.keep is None:
+        raise ValueError(f"No keep filter for {table.full_name!r}")
+    _columns = ", ".join(
+        _quote_ident(x["attname"]) for x in await conn.fetch(_INSERTABLE_COLUMNS_QUERY, table.schema, table.table)
+    )
+    async with conn.transaction():
+        await conn.execute(
+            f"CREATE TEMP TABLE padmy_keep ON COMMIT DROP AS SELECT {_columns} FROM {table.full_name} WHERE {table.keep}"
+        )
+        await conn.execute(f"TRUNCATE {table.full_name}")
+        status = await conn.execute(
+            f"INSERT INTO {table.full_name} ({_columns}) OVERRIDING SYSTEM VALUE SELECT {_columns} FROM padmy_keep"
+        )
+    logs.info(f"{table.full_name}: kept {status.split()[-1]} rows")
+
+
+async def anonymize_db(pool: asyncpg.Pool, config: Config, faker: Faker):
+    _tables = [_table for _table in config.tables if _table.has_ano_rules]
+    if not _tables:
         logs.info("No tables found to anonymize in config file")
+        return
+
+    # keep first, so the anonymization walks only the rows left
+    for _table in _tables:
+        if _table.keep is not None:
+            await get_conn(pool, partial(keep_rows, table=_table))
+
+    _tables_to_anonymize = [_table for _table in _tables if _table.has_ano_fields]
+    if not _tables_to_anonymize:
         return
 
     async with pool.acquire() as conn:
