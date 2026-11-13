@@ -22,14 +22,6 @@ You can get information about a database by running
 uvx padmy analyze --db test --schemas test
 ```
 
-or using the docker image
-
-```bash
- docker run -it \
-   --network host \
-   ghcr.io/soren/padmy:latest analyze --db test --schemas test
-```
-
 For instance, the following table definition will output:
 
 ```sql
