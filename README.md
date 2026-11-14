@@ -307,6 +307,27 @@ acknowledging it in its header:
 -- Rewrites: booking_items is small, run outside peak hours
 ```
 
+**Running outside a transaction**: migrations are applied in a transaction, so statements like
+`CREATE INDEX CONCURRENTLY` fail. Put such a statement alone in its own migration with a `-- No-transaction:` header:
+
+```sql
+-- Prev-file: ...
+-- Author: ...
+-- No-transaction: true
+
+CREATE INDEX CONCURRENTLY test_foo_idx ON general.test (foo);
+```
+
+- The file must hold a single statement: Postgres runs several statements of one file in an implicit transaction.
+- The migrations before it are committed first, so a run that fails afterwards keeps them; re-running resumes from
+  the failed one.
+- `--lock-timeout` applies to it at session level (restored afterwards); `--statement-timeout` does not, a concurrent
+  build is long by design.
+- `up` and `down` refuse to run it inside a transaction you opened yourself.
+- If it fails, it is not rolled back and may leave an invalid index: drop it (`DROP INDEX CONCURRENTLY ...`) before
+  running the migration again.
+- `lock-report` cannot run it in its rolled-back transaction: the report stops there and says so.
+
 ## 5. Comparing databases schemas
 
 You can compare two databases by running:
