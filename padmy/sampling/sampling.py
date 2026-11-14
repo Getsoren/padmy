@@ -7,7 +7,7 @@ from typing import cast, Literal
 
 import asyncpg
 from rich.progress import Progress
-from tracktolib.pg import insert_many, iterate_pg
+from tracktolib.pg import iterate_pg
 
 from ..db import Database, Table, FKConstraint
 from ..logs import logs
@@ -92,7 +92,7 @@ def get_insert_child_fk_data_queries(table: Table, child_table: Table) -> list[s
 
     return [
         f"""
-    INSERT INTO {table.tmp_name} ({table.values})
+    INSERT INTO {table.tmp_name} ({table.values}) OVERRIDING SYSTEM VALUE
     SELECT {table.get_values("t")} from {table.full_name} t
     {_fk_exists(_fk)}
     ON CONFLICT DO NOTHING
@@ -105,7 +105,7 @@ def get_insert_child_fk_data_queries(table: Table, child_table: Table) -> list[s
 def get_insert_data_query(table: Table):
     where_str = "and ".join(f"t2.{_pk.column_name} = t1.{_pk.column_name}" for _pk in table.primary_keys)
     query = f"""
-    INSERT into {table.tmp_name} ({table.values})
+    INSERT into {table.tmp_name} ({table.values}) OVERRIDING SYSTEM VALUE
     SELECT {table.values} from {table.full_name} t1
     """
     if where_str:
@@ -370,15 +370,14 @@ async def sample_database(
                         await copy_table_data(conn, target_conn, table, on_rows_copied=_on_rows_copied)
                     else:
                         query = f"SELECT {table.values} from {table.tmp_name}"
+                        _placeholders = ", ".join(f"${i}" for i in range(1, len(table.insert_columns) + 1))
+                        insert_query = (
+                            f"INSERT INTO {table.full_name} ({table.values}) OVERRIDING SYSTEM VALUE "
+                            f"VALUES ({_placeholders}) ON CONFLICT DO NOTHING"
+                        )
                         async for chunk in iterate_pg(conn, query, chunk_size=chunk_size):
                             logs.debug(f"{table.full_name} ({len(chunk)})")
-                            await insert_many(
-                                target_conn,
-                                table.full_name,
-                                [dict(x) for x in chunk],
-                                on_conflict="ON CONFLICT DO NOTHING",
-                                quote_columns=True,
-                            )
+                            await target_conn.executemany(insert_query, chunk)
                             if task2 is not None:
                                 progress.update(task2, advance=chunk_size)
                     progress.update(task1, advance=1)

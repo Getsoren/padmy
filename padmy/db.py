@@ -193,7 +193,7 @@ async def get_columns(conn: PgConnection, tables: list[Table]) -> dict[str, list
            JSON_AGG(
                    JSON_BUILD_OBJECT(
                            'name', column_name,
-                           'is_generated', COALESCE(generation_expression IS NOT NULL OR identity_generation = 'ALWAYS', FALSE)
+                           'is_generated', generation_expression IS NOT NULL
                        )
                ) AS columns
     FROM (SELECT *, table_schema || '.' || table_name AS full_name FROM information_schema.columns) t
