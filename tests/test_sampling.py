@@ -261,6 +261,36 @@ def setup_multi_fk_tables(engine, sample_engine):
     sample_engine.commit()
 
 
+@pytest.fixture()
+def setup_identity_unique_tables(engine, sample_engine):
+    query = """
+    DROP SCHEMA IF EXISTS tmptest CASCADE;
+    CREATE SCHEMA tmptest;
+    -- GENERATED ALWAYS id + extra UNIQUE column (like general.comment_threads)
+    CREATE TABLE IF NOT EXISTS tmptest.table_5
+    (
+        id  INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        foo TEXT NOT NULL UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS tmptest.table_6
+    (
+        id         SERIAL PRIMARY KEY,
+        table_5_id INT REFERENCES tmptest.table_5 ON DELETE CASCADE
+    );
+    """
+    engine.execute(query)
+    engine.execute(
+        "INSERT INTO tmptest.table_5 (id, foo) OVERRIDING SYSTEM VALUE "
+        "VALUES (100, 'foo-0'), (101, 'foo-1'), (102, 'foo-2')"
+    )
+    engine.execute("INSERT INTO tmptest.table_6 (id, table_5_id) VALUES (0, 100)")
+    engine.commit()
+
+    sample_engine.execute(query)
+    sample_engine.commit()
+
+
 @pytest.mark.parametrize(
     "patch_scenario, sample_size, expected",
     [
@@ -314,6 +344,18 @@ def setup_multi_fk_tables(engine, sample_engine):
             },
             id="2 fk paths to the same parent, both referenced parents kept",
         ),
+        pytest.param(
+            "setup_identity_unique_tables",
+            {
+                "tmptest.table_5": 70,
+                "tmptest.table_6": 100,
+            },
+            {
+                "_tmptest_table_5_tmp": [{"id": 100, "foo": "foo-0"}, {"id": 101, "foo": "foo-1"}],
+                "_tmptest_table_6_tmp": [{"id": 0, "table_5_id": 100}],
+            },
+            id="identity always parent keeps its ids (no unique violation on fill-up)",
+        ),
     ],
 )
 @pytest.mark.usefixtures("setup_test_db", "setup_sample_tables")
@@ -352,8 +394,43 @@ def test_create_tmp_tables(
     # assert False
 
 
-@pytest.mark.usefixtures("setup_test_db", "setup_2_simple_tables")
-def test_sample_database_simple(loop, apool, sample_engine):
+@pytest.mark.parametrize(
+    "patch_scenario, sampled_table, use_copy, expected",
+    [
+        pytest.param(
+            "setup_2_simple_tables",
+            "table_1",
+            True,
+            {"tmptest.table_1": [{"id": 0, "foo": "foo-0"}], "tmptest.table_2": [{"id": 0, "table_1_id": 0}]},
+            id="serial ids, copy",
+        ),
+        pytest.param(
+            "setup_identity_unique_tables",
+            "table_5",
+            True,
+            {
+                "tmptest.table_5": [{"id": 100, "foo": "foo-0"}],
+                "tmptest.table_6": [{"id": 0, "table_5_id": 100}],
+            },
+            id="identity always ids kept, copy",
+        ),
+        pytest.param(
+            "setup_identity_unique_tables",
+            "table_5",
+            False,
+            {
+                "tmptest.table_5": [{"id": 100, "foo": "foo-0"}],
+                "tmptest.table_6": [{"id": 0, "table_5_id": 100}],
+            },
+            id="identity always ids kept, insert",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("setup_test_db")
+def test_sample_database_simple(
+    loop, apool, sample_engine, patch_scenario, sampled_table, use_copy, expected, request: pytest.FixtureRequest
+):
+    request.getfixturevalue(patch_scenario)
     from padmy.sampling import sample_database
     from padmy.db import Database
     from padmy.config import Config, ConfigSchema, ConfigTable
@@ -362,7 +439,7 @@ def test_sample_database_simple(loop, apool, sample_engine):
     config = Config(
         sample=100.0,
         schemas=[ConfigSchema(schema="tmptest")],
-        tables=[ConfigTable(schema="tmptest", table="table_1", sample=0.0)],
+        tables=[ConfigTable(schema="tmptest", table=sampled_table, sample=0.0)],
     )
 
     async def test():
@@ -379,6 +456,7 @@ def test_sample_database_simple(loop, apool, sample_engine):
                 chunk_size=1,
                 db=db,
                 no_trigger=False,
+                use_copy=use_copy,
             )
         finally:
             await asyncio.wait_for(conn.close(), timeout=1)
@@ -386,10 +464,8 @@ def test_sample_database_simple(loop, apool, sample_engine):
 
     loop.run_until_complete(test())
 
-    data = fetch_all(sample_engine, "SELECT * FROM tmptest.table_2")
-    assert len(data) == 1
-    data = fetch_all(sample_engine, "SELECT * FROM tmptest.table_1")
-    assert len(data) == 1
+    data = {_table: fetch_all(sample_engine, f"SELECT * FROM {_table} ORDER BY id") for _table in expected}
+    assert_equals(data, expected)
 
 
 @pytest.mark.usefixtures(

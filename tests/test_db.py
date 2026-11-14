@@ -213,8 +213,8 @@ def test_load_pk_constraints(name, table, expected, aengine, engine, loop):
         id  INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY
     );
     """,
-            [{"name": "id", "is_generated": True}],
-            id="PK generated always",
+            [{"name": "id", "is_generated": False}],
+            id="PK generated always is copied as data",
         ),
         pytest.param(
             """
