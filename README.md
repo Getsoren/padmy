@@ -296,7 +296,8 @@ uvx padmy -vv migrate up --sql-dir /tmp/migrations --lock-timeout 5s --statement
 uvx padmy -vv migrate lock-report --sql-dir /tmp/migrations --lock-timeout 5s
 ```
 
-For each migration, it lists its duration, the existing tables it locks in `ACCESS EXCLUSIVE` mode until commit,
+For each migration, it lists its duration, the existing tables it locks against writes until commit (`ShareLock`
+or stronger: a plain `CREATE INDEX`, a foreign key on both tables, most `ALTER TABLE`s),
 and the tables it rewrites (their data file changed, as with a column type change), which stay blocked for as long
 as the rewrite takes. Postgres takes the same locks and rewrites on an empty database, so this works in CI; run it on
 a copy of production to get realistic durations. The command fails when a migration rewrites a table without
