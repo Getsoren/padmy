@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import LiteralString
 
 import asyncpg
 import pytest
@@ -428,7 +429,14 @@ def test_create_tmp_tables(
 )
 @pytest.mark.usefixtures("setup_test_db")
 def test_sample_database_simple(
-    loop, apool, sample_engine, patch_scenario, sampled_table, use_copy, expected, request: pytest.FixtureRequest
+    loop,
+    apool,
+    sample_engine,
+    patch_scenario,
+    sampled_table,
+    use_copy,
+    expected: dict[LiteralString, list[dict]],
+    request: pytest.FixtureRequest,
 ):
     request.getfixturevalue(patch_scenario)
     from padmy.sampling import sample_database
