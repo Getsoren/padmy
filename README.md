@@ -118,7 +118,8 @@ Python and pushed in chunked `UPDATE ... FROM unnest(...)` statements. A table c
 A field's `path:` fakes one top-level key of a `jsonb` column instead of the whole column
 (rows without that key keep it absent). A table's `keep:` SQL filter deletes every other row
 before anonymizing (`"false"` empties the table): the kept rows are copied aside, the table
-truncated and the rows copied back, so it fails if a foreign key references the table.
+truncated and the rows copied back. Foreign keys referencing the table are dropped for the
+truncate and re-created after, which fails if a dropped row is still referenced.
 
 Example config:
 
