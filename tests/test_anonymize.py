@@ -1,6 +1,8 @@
 import textwrap
+from contextlib import nullcontext
 from typing import LiteralString
 
+import asyncpg
 import pytest
 from tracktolib.pg_sync import fetch_all, insert_many
 
@@ -99,7 +101,7 @@ def test_anonymize_table(aengine, loop, engine, faker):
 def setup_ano_types_table(engine):
     engine.execute(
         """
-        DROP TABLE IF EXISTS public.ano_types;
+        DROP TABLE IF EXISTS public.ano_refs, public.ano_types;
         DROP TYPE IF EXISTS public.ano_address;
         CREATE TYPE public.ano_address AS (street TEXT, zipcode TEXT);
         CREATE TABLE public.ano_types
@@ -117,7 +119,7 @@ def setup_ano_types_table(engine):
     engine.execute("UPDATE public.ano_types SET addr = ('street', 'zip')::public.ano_address")
     engine.commit()
     yield
-    engine.execute("DROP TABLE IF EXISTS public.ano_types; DROP TYPE IF EXISTS public.ano_address")
+    engine.execute("DROP TABLE IF EXISTS public.ano_refs, public.ano_types; DROP TYPE IF EXISTS public.ano_address")
     engine.commit()
 
 
@@ -214,28 +216,52 @@ def test_anonymize_table_where(aengine, loop, engine, faker, fields, where, unto
 
 
 @pytest.mark.parametrize(
-    "keep, kept_ids",
+    "keep, kept_ids, fk, expectation",
     [
-        pytest.param("id < 2", {0, 1}, id="filter"),
-        pytest.param("false", set(), id="empty the table"),
+        pytest.param("id < 2", {0, 1}, None, nullcontext(), id="filter"),
+        pytest.param("false", set(), None, nullcontext(), id="empty the table"),
         pytest.param(
             "id IN (SELECT id FROM (SELECT id, row_number() OVER (ORDER BY id DESC) rn FROM public.ano_types) s WHERE rn <= 2)",
             {3, 4},
+            None,
+            nullcontext(),
             id="latest n rows",
         ),
+        pytest.param("id < 2", {0, 1}, "", nullcontext(), id="referenced table, referenced row kept"),
+        pytest.param(
+            "false",
+            {0, 1, 2, 3, 4},
+            "",
+            pytest.raises(asyncpg.ForeignKeyViolationError),
+            id="referenced table, referenced row dropped: nothing changes",
+        ),
+        pytest.param("false", set(), "NOT VALID", nullcontext(), id="referenced by a NOT VALID foreign key"),
     ],
 )
 @pytest.mark.usefixtures("setup_ano_types_table")
-def test_anonymize_db_keep(apool, engine, loop, faker, keep, kept_ids):
-    """`keep` runs before anonymizing, even on a table without fields, and generated columns come back."""
+def test_anonymize_db_keep(apool, engine, loop, faker, keep, kept_ids, fk, expectation):
+    """`keep` runs before anonymizing, even on a table without fields or one a foreign key references."""
     from padmy.anonymize import anonymize_db
     from padmy.config import Config, ConfigTable
 
-    loop.run_until_complete(anonymize_db(apool, Config(tables=[ConfigTable("public", "ano_types", keep=keep)]), faker))
+    fk_query: LiteralString = "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'ano_refs_fk'"
+    if fk is not None:
+        engine.execute("CREATE TABLE public.ano_refs AS SELECT 0 AS ano_id")
+        engine.execute(
+            f"ALTER TABLE public.ano_refs ADD CONSTRAINT ano_refs_fk FOREIGN KEY (ano_id) REFERENCES public.ano_types {fk}"
+        )
+        engine.commit()
+    fks = fetch_all(engine, fk_query)
+
+    with expectation:
+        loop.run_until_complete(
+            anonymize_db(apool, Config(tables=[ConfigTable("public", "ano_types", keep=keep)]), faker)
+        )
 
     db = fetch_all(engine, "SELECT id, phone_len FROM public.ano_types")
     assert {x["id"] for x in db} == kept_ids
     assert all(x["phone_len"] == 10 for x in db), "generated columns are recomputed on the rows put back"
+    assert fetch_all(engine, fk_query) == fks, "the referencing foreign keys come back as they were"
 
 
 def test_gen_mock_data_unique(faker):

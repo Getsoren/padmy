@@ -161,6 +161,15 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+# Foreign keys of other tables pointing at a table (TRUNCATE refuses while they exist)
+_REFERENCING_FKS_QUERY = """
+SELECT conrelid::regclass::text AS table_name, conname, pg_get_constraintdef(oid) AS definition
+FROM pg_constraint
+WHERE contype = 'f' AND confrelid = format('%I.%I', $1::text, $2::text)::regclass AND conrelid <> confrelid
+ORDER BY conname
+"""
+
+
 async def keep_rows(conn: asyncpg.Connection, table: ConfigTable):
     """Keeps only the rows matching `table.keep`: copied aside, TRUNCATE, copied back (no DELETE on a big table)."""
     if table.keep is None:
@@ -172,10 +181,18 @@ async def keep_rows(conn: asyncpg.Connection, table: ConfigTable):
         await conn.execute(
             f"CREATE TEMP TABLE padmy_keep ON COMMIT DROP AS SELECT {_columns} FROM {table.full_name} WHERE {table.keep}"
         )
+        # dropped for the TRUNCATE, put back after: a valid one fails here if a dropped row is still referenced
+        _fks = await conn.fetch(_REFERENCING_FKS_QUERY, table.schema, table.table)
+        for _fk in _fks:
+            await conn.execute(f"ALTER TABLE {_fk['table_name']} DROP CONSTRAINT {_quote_ident(_fk['conname'])}")
         await conn.execute(f"TRUNCATE {table.full_name}")
         status = await conn.execute(
             f"INSERT INTO {table.full_name} ({_columns}) OVERRIDING SYSTEM VALUE SELECT {_columns} FROM padmy_keep"
         )
+        for _fk in _fks:
+            await conn.execute(
+                f"ALTER TABLE {_fk['table_name']} ADD CONSTRAINT {_quote_ident(_fk['conname'])} {_fk['definition']}"
+            )
     logs.info(f"{table.full_name}: kept {status.split()[-1]} rows")
 
 
