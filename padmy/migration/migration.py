@@ -6,9 +6,11 @@ import functools
 import textwrap
 import time
 import typing
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
+from itertools import groupby
+from operator import attrgetter
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 import asyncpg
 from asyncpg import Connection
@@ -273,6 +275,8 @@ class MigrationReport:
     rewrites_reason: str | None
     write_locks: dict[str, str] = dataclasses.field(default_factory=dict)
     """Table -> strongest new lock blocking writes until commit (e.g. ShareLock for a plain CREATE INDEX)."""
+    skipped: str | None = None
+    """Why the migration was not run (and no later one was)."""
 
     @property
     def has_unacknowledged_rewrites(self) -> bool:
@@ -298,6 +302,12 @@ def _strongest_new_locks(before: set[tuple[int, str]], after: set[tuple[int, str
     return strongest
 
 
+NO_TRANSACTION_FAILURE_MSG = (
+    "This migration ran outside a transaction and was not rolled back: drop what it left behind "
+    "(e.g. an invalid index, with DROP INDEX CONCURRENTLY) before running it again"
+)
+
+
 async def apply_migration(
     conn: asyncpg.Connection, migration: MigrationFile, metadata: dict | None = None
 ) -> MigrationReport:
@@ -309,6 +319,8 @@ async def apply_migration(
         await exec_file(conn, migration.path)
     except Exception as e:
         logs.error(f'Failed to execute migration_id "{migration.file_id}" ({e})')
+        if migration.no_transaction:
+            logs.error(NO_TRANSACTION_FAILURE_MSG)
         raise e
     duration = time.perf_counter() - start
     tables_after = await _get_tables(conn)
@@ -360,6 +372,46 @@ async def _set_timeouts(conn: Connection, *, lock_timeout: str | None, statement
             await conn.execute("SELECT set_config($1, $2, true)", name, value)
 
 
+@asynccontextmanager
+async def _session_lock_timeout(conn: Connection, lock_timeout: str | None) -> AsyncIterator[None]:
+    """Session-level `lock_timeout` for a migration that runs outside a transaction, restored afterwards."""
+    if lock_timeout is None:
+        yield
+        return
+    previous = await conn.fetchval("SELECT current_setting('lock_timeout')")
+    await conn.execute("SELECT set_config('lock_timeout', $1, false)", lock_timeout)
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT set_config('lock_timeout', $1, false)", previous)
+
+
+@asynccontextmanager
+async def _migration_group(
+    conn: Connection,
+    *,
+    no_transaction: bool,
+    use_transaction: bool,
+    lock_timeout: str | None,
+    statement_timeout: str | None,
+) -> AsyncIterator[None]:
+    """Run a group of consecutive migrations: in one transaction, or one by one for `-- No-transaction:` files.
+    `statement_timeout` is not applied to the latter: a concurrent index build is long by design.
+    """
+    if no_transaction:
+        async with _session_lock_timeout(conn, lock_timeout):
+            yield
+        return
+    async with conn.transaction() if use_transaction else nullcontext():
+        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
+        yield
+
+
+def _check_no_outer_transaction(conn: Connection, migrations: list[MigrationFile]):
+    if conn.is_in_transaction() and any(m.no_transaction for m in migrations):
+        raise ValueError("'-- No-transaction:' migrations cannot run inside an open transaction")
+
+
 async def migrate_up(
     conn: Connection,
     folder: Path,
@@ -380,12 +432,18 @@ async def migrate_up(
         logs.info("No migrations to apply")
         return False
 
-    _transaction = conn.transaction if use_transaction else nullcontext
+    _check_no_outer_transaction(conn, migration_files)
     logs.info(f"Found {len(migration_files)} migrations to apply")
-    async with _transaction():
-        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
-        for _migration in migration_files:
-            await apply_migration(conn, _migration, metadata)
+    for _no_transaction, _migrations in groupby(migration_files, key=attrgetter("no_transaction")):
+        async with _migration_group(
+            conn,
+            no_transaction=_no_transaction,
+            use_transaction=use_transaction,
+            lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
+        ):
+            for _migration in _migrations:
+                await apply_migration(conn, _migration, metadata)
     logs.info("Done!")
     return True
 
@@ -398,13 +456,33 @@ async def migrate_report(
     lock_timeout: str | None = None,
     statement_timeout: str | None = None,
 ) -> list[MigrationReport]:
-    """Apply the pending migrations in one transaction, report what each one locked and rewrote, then roll back."""
+    """Apply the pending migrations in one transaction, report what each one locked and rewrote, then roll back.
+    A `-- No-transaction:` migration cannot run in that transaction: the report stops there, and its last entry
+    says why. Later migrations may depend on it (e.g. ADD CONSTRAINT ... USING INDEX).
+    """
     migration_files = await get_migration_files(conn, folder, nb_migrations=nb_migrations)
+    reports: list[MigrationReport] = []
     transaction = conn.transaction()
     await transaction.start()
     try:
         await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
-        return [await apply_migration(conn, _migration) for _migration in migration_files]
+        for _migration in migration_files:
+            if _migration.no_transaction:
+                reason = "runs outside a transaction: it and the migrations after it were not checked"
+                logs.warning(f"Stopping at {_migration.path.name}: {reason}")
+                reports.append(
+                    MigrationReport(
+                        file_name=_migration.path.name,
+                        duration=0,
+                        locked_tables=[],
+                        rewritten_tables=[],
+                        rewrites_reason=_migration.rewrites_reason,
+                        skipped=reason,
+                    )
+                )
+                break
+            reports.append(await apply_migration(conn, _migration))
+        return reports
     finally:
         await transaction.rollback()
 
@@ -495,27 +573,35 @@ async def migrate_down(
         logs.info("No rollback files to apply")
         return False
 
-    _transaction = conn.transaction if use_transaction else nullcontext
+    _check_no_outer_transaction(conn, rollback_files)
     logs.info(f"Found {nb_files} rollback files to apply")
-    async with _transaction():
-        await _set_timeouts(conn, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
-        for _rollback in rollback_files:
-            logs.info(f"Running {_rollback.path.name}...")
-            try:
-                await exec_file(conn, _rollback.path)
-            except Exception as e:
-                logs.error(f'Failed to execute migration_id "{_rollback.file_id}"')
-                raise e
+    for _no_transaction, _rollbacks in groupby(rollback_files, key=attrgetter("no_transaction")):
+        async with _migration_group(
+            conn,
+            no_transaction=_no_transaction,
+            use_transaction=use_transaction,
+            lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
+        ):
+            for _rollback in _rollbacks:
+                logs.info(f"Running {_rollback.path.name}...")
+                try:
+                    await exec_file(conn, _rollback.path)
+                except Exception as e:
+                    logs.error(f'Failed to execute migration_id "{_rollback.file_id}"')
+                    if _rollback.no_transaction:
+                        logs.error(NO_TRANSACTION_FAILURE_MSG)
+                    raise e
 
-            migration_data = {
-                "file_ts": _rollback.ts,
-                "file_id": _rollback.file_id,
-                "migration_type": "down",
-                "file_name": _rollback.path.name,
-            }
-            if metadata:
-                migration_data["meta"] = metadata
-            await insert_one(conn, "public.migration", migration_data)
+                migration_data = {
+                    "file_ts": _rollback.ts,
+                    "file_id": _rollback.file_id,
+                    "migration_type": "down",
+                    "file_name": _rollback.path.name,
+                }
+                if metadata:
+                    migration_data["meta"] = metadata
+                await insert_one(conn, "public.migration", migration_data)
 
     logs.info("Done!")
     return True

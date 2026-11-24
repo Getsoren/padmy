@@ -239,7 +239,7 @@ async def migrate_lock_report_main(
     for report in reports:
         table.add_row(
             report.file_name,
-            f"{report.duration:.3f}s",
+            f"{report.duration:.3f}s" if report.skipped is None else f"[yellow]not run: {report.skipped}[/yellow]",
             ", ".join(f"{name} ({mode})" for name, mode in report.write_locks.items()),
             f"[red]{', '.join(report.rewritten_tables)}[/red]",
             report.rewrites_reason or "",
