@@ -501,7 +501,12 @@ _REPORT_HEADER = "-- Prev-file: 1-00000000-up.sql\n-- Author: foo@bar.baz\n"
         pytest.param(
             "",
             "ALTER TABLE general.test ADD baz text;",
-            {"locked_tables": ["general.test"], "rewritten_tables": [], "has_unacknowledged_rewrites": False},
+            {
+                "locked_tables": ["general.test"],
+                "write_locks": {"general.test": "AccessExclusiveLock"},
+                "rewritten_tables": [],
+                "has_unacknowledged_rewrites": False,
+            },
             id="brief lock, no rewrite",
         ),
         pytest.param(
@@ -523,6 +528,18 @@ _REPORT_HEADER = "-- Prev-file: 1-00000000-up.sql\n-- Author: foo@bar.baz\n"
                 "has_unacknowledged_rewrites": False,
             },
             id="acknowledged rewrite",
+        ),
+        pytest.param(
+            "",
+            "CREATE INDEX test_foo_idx ON general.test (foo);",
+            {"locked_tables": [], "write_locks": {"general.test": "ShareLock"}},
+            id="plain index blocks writes",
+        ),
+        pytest.param(
+            "",
+            "ALTER TABLE general.test2 ADD CONSTRAINT test2_fk FOREIGN KEY (id) REFERENCES general.test (id);",
+            {"write_locks": {"general.test": "ShareRowExclusiveLock", "general.test2": "ShareRowExclusiveLock"}},
+            id="foreign key blocks writes on both tables",
         ),
         pytest.param(
             "",

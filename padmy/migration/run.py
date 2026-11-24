@@ -214,7 +214,7 @@ async def migrate_lock_report_main(
 ):
     """
     Applies the pending migrations in a transaction that is rolled back, and lists for each one its duration,
-    the existing tables it locks in ACCESS EXCLUSIVE mode and the ones it rewrites.
+    the existing tables it locks against writes (ShareLock or stronger) and the ones it rewrites.
     Fails if a migration rewrites a table without a `-- Rewrites: <reason>` header.
     """
     from rich.table import Table
@@ -234,13 +234,13 @@ async def migrate_lock_report_main(
         return
 
     table = Table(title="Migration locks")
-    for column in ("Migration", "Duration", "Locked (ACCESS EXCLUSIVE)", "Rewritten", "Rewrites reason"):
+    for column in ("Migration", "Duration", "Blocks writes until commit", "Rewritten", "Rewrites reason"):
         table.add_column(column)
     for report in reports:
         table.add_row(
             report.file_name,
             f"{report.duration:.3f}s",
-            ", ".join(report.locked_tables),
+            ", ".join(f"{name} ({mode})" for name, mode in report.write_locks.items()),
             f"[red]{', '.join(report.rewritten_tables)}[/red]",
             report.rewrites_reason or "",
         )
