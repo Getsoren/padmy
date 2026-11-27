@@ -320,8 +320,9 @@ If differences are found, the command will output the differences between the tw
 ## 6. Finding FK diamonds
 
 Two foreign-key paths that leave one table and meet at another can point to two different rows of it, unless a
-column (`tenant_id`, `article_id`…) is part of both first constraints. `fk-diamonds` lists those pairs, the first
-meeting point only:
+column (`tenant_id`, `article_id`…) is part of both first constraints, or one constraint into the first table of
+either path holds a column of each (`(booking_item_id, booking_id)` into `booking_items`). A tie through a chain of
+constraints is not followed. `fk-diamonds` lists those pairs, the first meeting point only:
 
 ```bash
 uvx padmy fk-diamonds --db soren --schemas general_fra billing_fra

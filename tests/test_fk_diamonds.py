@@ -57,6 +57,33 @@ _BASE = [
             [
                 *_BASE,
                 _fk("prices_item_fkey", "prices", ["item_id"], "items"),
+                _fk("prices_line_fkey", "prices", ["line_id"], "lines"),
+                _fk("prices_line_item_fkey", "prices", ["line_id", "item_id"], "lines"),
+            ],
+            [],
+            id="constraint into a first table holding a column of each pins both paths",
+        ),
+        pytest.param(
+            [
+                *_BASE,
+                _fk("prices_item_fkey", "prices", ["item_id", "tenant_id"], "items"),
+                _fk("prices_line_fkey", "prices", ["line_id"], "lines"),
+                _fk("prices_line_tenant_fkey", "prices", ["line_id", "tenant_id"], "line_tenants"),
+            ],
+            [
+                FKDiamond(
+                    "s.prices",
+                    "s.articles",
+                    ("prices_item_fkey", "items_article_fkey"),
+                    ("prices_line_fkey", "lines_article_fkey"),
+                )
+            ],
+            id="a chain through tenant_id does not pin the paths",
+        ),
+        pytest.param(
+            [
+                *_BASE,
+                _fk("prices_item_fkey", "prices", ["item_id"], "items"),
                 _fk("prices_option_fkey", "prices", ["option_id"], "options"),
             ],
             [],
