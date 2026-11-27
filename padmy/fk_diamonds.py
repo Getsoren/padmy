@@ -45,12 +45,27 @@ def _routes(first: FKConstraint, edges: dict[str, list[FKConstraint]], max_depth
     return best
 
 
+def _tied(fk_a: FKConstraint, fk_b: FKConstraint, fks: Sequence[FKConstraint]) -> bool:
+    """Whether a shared column, or one constraint into either first table holding a column of each, ties the two."""
+    cols_a, cols_b = set(fk_a.column_names), set(fk_b.column_names)
+    if cols_a & cols_b:
+        return True
+    targets = {fk_a.foreign_full_name, fk_b.foreign_full_name}
+    return any(
+        fk.foreign_full_name in targets and set(fk.column_names) & cols_a and set(fk.column_names) & cols_b
+        for fk in fks
+    )
+
+
 def find_fk_diamonds(fks: Sequence[FKConstraint], max_depth: int = 4) -> list[FKDiamond]:
     """Pairs of FK paths from one table that first meet at another, their first constraints sharing no column.
 
     Such paths can point to two different rows of the table they meet at: nothing in the schema
-    makes them agree unless a column (tenant_id, article_id…) is part of both first constraints.
-    Only the first meeting point is reported, one pair per (table, meets_at); self-references are skipped.
+    makes them agree unless a column (tenant_id, article_id…) is part of both first constraints, or a
+    constraint into the first table of either path holds a column of each (e.g. `(booking_item_id, booking_id)`
+    into `booking_items` ties `booking_id` and `booking_item_id`). A tie through a chain of constraints is
+    not followed: such pairs are still reported. Only the first meeting point is reported, one pair per
+    (table, meets_at); self-references are skipped.
     """
     edges: dict[str, list[FKConstraint]] = defaultdict(list)
     for fk in fks:
@@ -64,7 +79,7 @@ def find_fk_diamonds(fks: Sequence[FKConstraint], max_depth: int = 4) -> list[FK
         found: dict[str, FKDiamond] = {}
         for i, (fk_a, routes_a) in enumerate(routes):
             for fk_b, routes_b in routes[i + 1 :]:
-                if set(fk_a.column_names) & set(fk_b.column_names):
+                if _tied(fk_a, fk_b, firsts):
                     continue
                 for meets_at in sorted(routes_a.keys() & routes_b.keys()):
                     a, b = routes_a[meets_at], routes_b[meets_at]
