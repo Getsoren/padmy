@@ -162,6 +162,43 @@ async def analyze_main(
     run_simple_app(db, port=port)
 
 
+@cli.command(cmd="fk-diamonds", help="List FK paths that leave a table and meet again without a shared column")
+def fk_diamonds_main(
+    db_name: str = Option(..., "--db", help="Database to analyze"),
+    pg_infos: PGConnectionInfo = Derived(get_pg_infos),
+    schemas: list[str] = Option(..., "--schemas", help="Schemas to analyze"),
+    max_depth: int = Option(4, "--max-depth", help="Longest path followed, in foreign keys"),
+    ignore_file: Path | None = Option(
+        None, "--ignore-file", help="Accepted pairs, one 'schema.table>schema.meets_at' per line"
+    ),
+    write_ignore: str | None = Option(None, "--write-ignore", help="Write the pairs found to this file and exit 0"),
+) -> None:
+    """
+    Exits 1 when a pair is found that the ignore file does not list
+    """
+    from padmy.db import FKConstraint, load_foreign_keys
+    from padmy.fk_diamonds import find_fk_diamonds, parse_ignore
+
+    async def _load() -> list[FKConstraint]:
+        async with pg_infos.get_pool(db_name) as pool, pool.acquire() as conn:
+            return await load_foreign_keys(conn, schemas)
+
+    diamonds = find_fk_diamonds(asyncio.run(_load()), max_depth=max_depth)
+    if write_ignore is not None:
+        Path(write_ignore).write_text("".join(f"{d.key}\n" for d in diamonds))
+        CONSOLE.print(f"{len(diamonds)} pair(s) written to {write_ignore}")
+        return
+    ignored = parse_ignore(ignore_file.read_text().splitlines()) if ignore_file else set()
+    diamonds = [d for d in diamonds if d.key not in ignored]
+    if not diamonds:
+        CONSOLE.print("[green]No FK diamond found[/green]")
+        return
+    for d in diamonds:
+        CONSOLE.print(f"[orange1]{d.key}[/orange1]\n  1: {' → '.join(d.path_1)}\n  2: {' → '.join(d.path_2)}")
+    CONSOLE.print(f"[orange1]{len(diamonds)} FK diamond(s) found[/orange1]")
+    sys.exit(1)
+
+
 @cli.command(cmd="compare", help="Compare 2 databases")
 async def compare_db_main(
     from_db: str = Option(..., "--db", help="Database to explore"),
