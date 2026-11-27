@@ -317,6 +317,30 @@ uvx padmy -vv schema-diff --db soren --schemas schema_1,schema_2
 
 If differences are found, the command will output the differences between the two databases.
 
+## 6. Finding FK diamonds
+
+Two foreign-key paths that leave one table and meet at another can point to two different rows of it, unless a
+column (`tenant_id`, `article_id`…) is part of both first constraints. `fk-diamonds` lists those pairs, the first
+meeting point only:
+
+```bash
+uvx padmy fk-diamonds --db soren --schemas general_fra billing_fra
+# billing_fra.bill_items>general_fra.bookings
+#   1: bill_items_bill_id_fkey → bills_booking_id_fkey
+#   2: bill_items_booking_id_fkey
+```
+
+It exits 1 when a pair is found. Pairs you accept (two different users on `created_by` and `closed_by`) go in an
+ignore file, one `schema.table>schema.meets_at` per line, `#` for comments. To start from an existing schema, write
+the current pairs once, then run with the file so only new ones fail:
+
+```bash
+uvx padmy fk-diamonds --db soren --schemas general_fra --write-ignore fk-diamonds.ignore
+uvx padmy fk-diamonds --db soren --schemas general_fra --ignore-file fk-diamonds.ignore
+```
+
+It only follows foreign keys: a reference kept in JSON, or a CHECK that ties both paths, is not seen.
+
 ### Known limitations
 
 **Exact sample size**
